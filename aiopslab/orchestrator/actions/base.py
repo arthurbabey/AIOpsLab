@@ -77,7 +77,7 @@ class TaskActions:
 
     @staticmethod
     @action
-    def exec_shell(command: str, timeout: int = 30) -> str:
+    def exec_shell(command: str, timeout: int = 120) -> str:
         """
         Execute any shell command in a predefined debugging environment.
         Note: this is NOT A STATEFUL OR INTERACTIVE shell session. So you cannot

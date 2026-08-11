@@ -29,11 +29,56 @@ from aiopslab.orchestrator.problems.wrong_bin_usage import *
 from aiopslab.orchestrator.problems.operator_misoperation import *
 from aiopslab.orchestrator.problems.flower_node_stop import *
 from aiopslab.orchestrator.problems.flower_model_misconfig import *
+from aiopslab.orchestrator.problems.security_privileged import *
+from aiopslab.orchestrator.problems.security_run_as_root import *
+from aiopslab.orchestrator.problems.security_wildcard_rbac import *
+from aiopslab.orchestrator.problems.security_rbac_escalation import *
+from aiopslab.orchestrator.problems.security_rogue_shell import *
+from aiopslab.orchestrator.problems.security_transient_read import *
+from aiopslab.orchestrator.problems.security_noop import *
+from aiopslab.orchestrator.problems.security_benign import *
 
 
 class ProblemRegistry:
     def __init__(self):
         self.PROBLEM_REGISTRY = {
+            # Security drift — OPA-visible checking-complexity ladder (RQ3), Phase A
+            # Tier 0: single obvious object
+            "security_privileged-detection-1": lambda: PrivilegedContainerDetection(
+                faulty_service="user-service"
+            ),
+            "security_privileged-localization-1": lambda: PrivilegedContainerLocalization(
+                faulty_service="user-service"
+            ),
+            # Tier 1: single subtle field (runAsUser: 0)
+            "security_run_as_root-detection-1": lambda: RunAsRootDetection(
+                faulty_service="user-service"
+            ),
+            "security_run_as_root-localization-1": lambda: RunAsRootLocalization(
+                faulty_service="user-service"
+            ),
+            # Tier 2: needle-in-haystack (1 wildcard Role among ~60 benign)
+            "security_wildcard_rbac-detection-1": lambda: WildcardRbacDetection(),
+            "security_wildcard_rbac-localization-1": lambda: WildcardRbacLocalization(),
+            # Tier 2 JUDGMENT hard-candidate: subtle escalation primitive (impersonate) in haystack
+            "security_rbac_escalation-detection-1": lambda: RbacEscalationDetection(),
+            "security_rbac_escalation-localization-1": lambda: RbacEscalationLocalization(),
+            # Runtime (Falco-only): rogue process reads /etc/shadow — base+OPA blind, +Falco detects
+            "security_rogue_shell-detection-1": lambda: RogueShellDetection(),
+            "security_rogue_shell-localization-1": lambda: RogueShellLocalization(),
+            # Runtime TRANSIENT: one-shot reads, no lingering process → base truly blind (ps finds nothing)
+            "security_transient_read-detection-1": lambda: TransientReadDetection(),
+            "security_transient_read-localization-1": lambda: TransientReadLocalization(),
+            # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
+            "security_noop_misconfig-detection-1": lambda: NoopMisconfigDetection(),
+            "security_noop_misconfig-localization-1": lambda: NoopMisconfigLocalization(),
+            "security_noop_intrusion-detection-1": lambda: NoopIntrusionDetection(),
+            "security_noop_intrusion-localization-1": lambda: NoopIntrusionLocalization(),
+            # Benign twins (RQ2 specificity): attack-shaped-but-legitimate activity, detected=False
+            "security_benign_exec-detection-1": lambda: BenignAdminShellDetection(),
+            "security_benign_exec-localization-1": lambda: BenignAdminShellLocalization(),
+            "security_benign_secret_read-detection-1": lambda: BenignSecretReadDetection(),
+            "security_benign_secret_read-localization-1": lambda: BenignSecretReadLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

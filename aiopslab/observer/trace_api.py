@@ -22,10 +22,12 @@ class TraceAPI:
         self.namespace = namespace
         self.stop_event = threading.Event()
         self.output_threads = []
+        self.local_port = None  # ARRIVE PATCH: per-instance free local port (see ARRIVE_AIOPSLAB_PATCHES.md)
 
         if self.namespace == "astronomy-shop":
             # No NodePort in astronomy shop
-            self.base_url = "http://localhost:16686/jaeger/ui"
+            self.local_port = self._find_free_port()
+            self.base_url = f"http://localhost:{self.local_port}/jaeger/ui"
             self.start_port_forward()
         else:
             # Other namespaces may expose a NodePort
@@ -33,8 +35,16 @@ class TraceAPI:
             if node_port:
                 self.base_url = f"http://localhost:{node_port}"
             else:
-                self.base_url = "http://localhost:16686"
+                self.local_port = self._find_free_port()
+                self.base_url = f"http://localhost:{self.local_port}"
                 self.start_port_forward()
+
+    def _find_free_port(self):
+        # ARRIVE PATCH: bind to port 0 so the OS assigns a free local port — avoids the hardcoded
+        # :16686 collision/leak that hung init_problem when a prior forward wasn't cleaned up.
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", 0)); port = s.getsockname()[1]; s.close()
+        return port
 
     def get_nodeport(self, service_name, namespace):
         """Fetch the NodePort for the given service."""
@@ -62,6 +72,12 @@ class TraceAPI:
     def print_output(self, stream):
         """Thread function to print output from a subprocess stream non-blockingly."""
         while not self.stop_event.is_set():
+            # ARRIVE PATCH: check the process at the TOP and guard against None. The original
+            # `self.port_forward_process.poll()` at the bottom crashed with AttributeError once
+            # cleanup nulled the process, leaking the thread/forward (root of the :16686 hangs).
+            proc = self.port_forward_process
+            if proc is None or proc.poll() is not None:
+                break
             # Check if there is content to read
             ready, _, _ = select.select([stream], [], [], 0.1)  # 0.1-second timeout
             if ready:
@@ -74,8 +90,6 @@ class TraceAPI:
                 except ValueError as e:
                     print("Stream closed:", e)
                     break
-            if self.port_forward_process.poll() is not None:
-                break
 
     def is_port_in_use(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -97,19 +111,19 @@ class TraceAPI:
     def start_port_forward(self):
         """Starts kubectl port-forward command to access Jaeger service or pod."""
         for attempt in range(3):
-            if self.is_port_in_use(16686):
-                print(
-                    f"Port 16686 is already in use. Attempt {attempt + 1} of 3. Retrying in 3 seconds..."
-                )
-                time.sleep(3)
-                continue
+            # ARRIVE PATCH: forward a FREE local port -> 16686 (was hardcoded 16686:16686, which
+            # collided/hung when a previous forward leaked). Re-pick a free port on each retry.
+            if self.local_port is None or self.is_port_in_use(self.local_port):
+                self.local_port = self._find_free_port()
+                suffix = "/jaeger/ui" if self.namespace == "astronomy-shop" else ""
+                self.base_url = f"http://localhost:{self.local_port}{suffix}"
 
             # Use pod port-forwarding for astronomy-shop only
             if self.namespace == "astronomy-shop":
                 pod_name = self.get_jaeger_pod_name()
-                command = f"kubectl port-forward pod/{pod_name} 16686:16686 -n {self.namespace}"
+                command = f"kubectl port-forward pod/{pod_name} {self.local_port}:16686 -n {self.namespace}"
             else:
-                command = f"kubectl port-forward svc/jaeger 16686:16686 -n {self.namespace}"
+                command = f"kubectl port-forward svc/jaeger {self.local_port}:16686 -n {self.namespace}"
 
             print("Starting port-forward with command:", command)
             self.port_forward_process = subprocess.Popen(
