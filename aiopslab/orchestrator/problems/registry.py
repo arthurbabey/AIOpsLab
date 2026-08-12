@@ -35,6 +35,7 @@ from aiopslab.orchestrator.problems.security_wildcard_rbac import *
 from aiopslab.orchestrator.problems.security_rbac_escalation import *
 from aiopslab.orchestrator.problems.security_rogue_shell import *
 from aiopslab.orchestrator.problems.security_transient_read import *
+from aiopslab.orchestrator.problems.security_attacker_shell import *
 from aiopslab.orchestrator.problems.security_noop import *
 from aiopslab.orchestrator.problems.security_benign import *
 
@@ -69,6 +70,12 @@ class ProblemRegistry:
             # Runtime TRANSIENT: one-shot reads, no lingering process → base truly blind (ps finds nothing)
             "security_transient_read-detection-1": lambda: TransientReadDetection(),
             "security_transient_read-localization-1": lambda: TransientReadLocalization(),
+            # RQ2 matched pair, attack half: TTY shell doing recon + credential theft. Fires
+            # "Terminal shell in container" (SHARED with security_benign_exec) AND "Read sensitive
+            # file untrusted" (unique). Score together with security_benign_exec — the shared rule
+            # is what makes the twin a real specificity test rather than a second no-op.
+            "security_attacker_shell-detection-1": lambda: AttackerShellDetection(),
+            "security_attacker_shell-localization-1": lambda: AttackerShellLocalization(),
             # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
             "security_noop_misconfig-detection-1": lambda: NoopMisconfigDetection(),
             "security_noop_misconfig-localization-1": lambda: NoopMisconfigLocalization(),
