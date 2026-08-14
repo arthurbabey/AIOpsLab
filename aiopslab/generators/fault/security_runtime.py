@@ -18,19 +18,27 @@ fresh for the whole episode (a Falco-equipped agent can query any reasonable win
 it). It's a background process inside ONE pod, so base's normal investigation (logs/metrics/specs)
 won't surface it — base would have to `exec ps` the exact compromised pod among many.
 
-RQ2 matched pair (`attacker_shell` vs `benign_admin_shell`) — the specificity test
--------------------------------------------------------------------------------
+RQ2 matched twins (one attack, two benign look-alikes) — the specificity test
+-----------------------------------------------------------------------------
 A benign twin only tests specificity if it fires the SAME Falco rule as an attack; otherwise the
-agent dismisses it by rule-type and never has to reason about context. The pair here:
+agent dismisses it by rule-type and never has to reason about context. All three fire
+"Terminal shell in container", same priority, same pod:
 
-    attacker_shell      TTY shell -> recon + `cat /etc/shadow`
+    attacker_shell      TTY shell -> recon + `cat /etc/shadow`          (detected=True)
                         fires "Terminal shell in container" AND "Read sensitive file untrusted"
-    benign_admin_shell  TTY shell -> harmless diagnostics only
+    benign_admin_shell  TTY shell -> harmless diagnostics only          (detected=False)
+                        fires "Terminal shell in container" ONLY
+    benign_secret_read  TTY shell -> reads its OWN mounted SA token     (detected=False)
                         fires "Terminal shell in container" ONLY
 
-Same rule, same priority, same pod. The discriminator is what the shell *did* — exactly the SOC
-judgement: a shell alone is not a compromise, a shell plus credential access is. An agent that
-flags every "Terminal shell in container" alert now produces a visible false positive.
+The discriminator is what the shell *did* — exactly the SOC judgement: a shell alone is not a
+compromise, a shell plus *someone else's* credentials is. An agent that flags every
+"Terminal shell in container" alert now produces a visible false positive on both twins.
+
+The two twins sit at different difficulties, deliberately: `benign_admin_shell` is anodyne
+(`uname`, `df`), so "no credential access" is easy to see; `benign_secret_read` DOES touch a
+credential, just its own, so the agent must distinguish self-access from theft rather than just
+checking whether a secret was touched at all.
 
 TTY mechanics (why the twin used to fire nothing): Falco's "Terminal shell in container" requires
 `proc.tty != 0`, and `kubectl exec -t` SILENTLY disables the TTY when its stdin is not a terminal
@@ -297,22 +305,39 @@ class SecurityRuntimeInjector(FaultInjector):
     def recover_benign_admin_shell(self, microservices: list[str] = None):
         self._stop_host_loops()
 
-    # SR.5 - benign_secret_read (detected=False) — ⚠️ NOT A WORKING TWIN, see PROBLEM_REVIEW §3.4.
-    # Intent: the workload reads its OWN mounted ServiceAccount token — legitimate self-access that
-    # resembles credential theft. Reality: Falco's `sensitive_files` macro covers /etc/shadow,
-    # /etc/sudoers and /etc/pam.* — NOT /var/run/secrets/... — so this fires NO rule and is
-    # behaviourally a second no-op, not a specificity test. It is deliberately left un-verified
-    # (there is no rule to verify) and excluded from the RQ2 pair; `attacker_shell` vs
-    # `benign_admin_shell` is the pair that carries RQ2. Retire or rebuild it before reporting RQ2.
+    # SR.5 - benign_secret_read (BENIGN TWIN of attacker_shell, detected=False): an operator/workload
+    # session that legitimately touches its OWN credentials — the SA token mounted into the pod.
+    #
+    # Why it is delivered through a TTY shell: Falco's `sensitive_files` macro covers /etc/shadow,
+    # /etc/sudoers and /etc/pam.* — NOT /var/run/secrets/... — so reading the token fires no rule
+    # of its own. Read alone (the original form of this injector) it therefore fired NOTHING and
+    # was behaviourally a second no-op rather than a specificity test. Running it inside an
+    # interactive shell makes it fire "Terminal shell in container", the SAME rule (same priority,
+    # same pod) as the attack half `attacker_shell` — so it becomes a real twin.
+    #
+    # This makes it a HARDER twin than benign_admin_shell: both halves of this pair now show
+    # "shell + credential access", and the discriminator is WHOSE credentials — the attack reads
+    # /etc/shadow (fires "Read sensitive file untrusted" on top), this reads only the pod's own
+    # mounted token. An agent that flags "shell touched a credential" produces a false positive here.
+    #
+    # Note the rule no longer depends on the token being readable: the shell itself is what fires.
     def inject_benign_secret_read(self, microservices: list[str]):
         for service in microservices:
             pod = self._first_pod(service)
             if not pod:
                 print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
                 continue
-            self._start_host_loop(pod, "cat /var/run/secrets/kubernetes.io/serviceaccount/token")
-            print(f"[security_runtime] BENIGN own-SA-token read on pod {pod} "
+            self._start_host_loop(
+                pod,
+                "sh -c 'id; cat /var/run/secrets/kubernetes.io/serviceaccount/token; "
+                "ls -la /var/run/secrets/kubernetes.io/serviceaccount'",
+                tty=True,
+            )
+            print(f"[security_runtime] BENIGN own-SA-token read (interactive session) on pod {pod} "
                   f"({service}) via host loop | ns: {self.namespace}")
+            # Same verification contract as every other runtime injector: a twin that does not fire
+            # the shared rule is not a twin, and a silently-silent twin is a mislabelled episode.
+            self._verify_falco(self._BENIGN_SHELL_RULES, pod)
 
     def recover_benign_secret_read(self, microservices: list[str] = None):
         self._stop_host_loops()

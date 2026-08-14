@@ -1,11 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""SR.3 — attacker interactive shell on SocialNetwork (the malicious half of the RQ2 pair).
+"""SR.3 — attacker interactive shell on SocialNetwork (the malicious half of the RQ2 set).
 
-The counterpart to `security_benign_exec`. An attacker holds an interactive (TTY) shell inside
-`user-service` and uses it for recon (`id`, `hostname`, listing the mounted SA token) *and*
-credential theft (`cat /etc/shadow`). Two Falco rules fire:
+The counterpart to BOTH benign twins (`security_benign_exec`, `security_benign_secret_read`). An
+attacker holds an interactive (TTY) shell inside `user-service` and uses it for recon (`id`,
+`hostname`, listing the mounted SA token) *and* credential theft (`cat /etc/shadow`). Two Falco
+rules fire:
 
     "Terminal shell in container"        <- ALSO fires on the benign admin-shell twin
     "Read sensitive file untrusted"      <- fires ONLY here
@@ -66,9 +67,11 @@ class AttackerShellBaseTask:
             "detection_surface": ["falco"],
             "tier": None,
             "fault_class": "runtime-intrusion",
-            # RQ2 pairing: scored together with its twin (precision on attack-shaped-but-legitimate
-            # activity). See security_benign.py::_BenignAdminShell.
-            "rq2_pair": "security_benign_exec",
+            # RQ2 pairing: scored together with BOTH twins (precision on attack-shaped-but-
+            # legitimate activity). security_benign_exec is the easy twin (no credential access at
+            # all); security_benign_secret_read is the hard one (reads its OWN SA token, so "a
+            # secret was touched" no longer separates it from this attack). See security_benign.py.
+            "rq2_pair": ["security_benign_exec", "security_benign_secret_read"],
         }
 
     def start_workload(self):

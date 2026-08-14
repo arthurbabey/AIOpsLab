@@ -70,10 +70,10 @@ class ProblemRegistry:
             # Runtime TRANSIENT: one-shot reads, no lingering process → base truly blind (ps finds nothing)
             "security_transient_read-detection-1": lambda: TransientReadDetection(),
             "security_transient_read-localization-1": lambda: TransientReadLocalization(),
-            # RQ2 matched pair, attack half: TTY shell doing recon + credential theft. Fires
-            # "Terminal shell in container" (SHARED with security_benign_exec) AND "Read sensitive
-            # file untrusted" (unique). Score together with security_benign_exec — the shared rule
-            # is what makes the twin a real specificity test rather than a second no-op.
+            # RQ2 attack half: TTY shell doing recon + credential theft. Fires "Terminal shell in
+            # container" (SHARED with BOTH benign twins) AND "Read sensitive file untrusted"
+            # (unique). Score together with security_benign_exec + security_benign_secret_read —
+            # the shared rule is what makes a twin a real specificity test, not a second no-op.
             "security_attacker_shell-detection-1": lambda: AttackerShellDetection(),
             "security_attacker_shell-localization-1": lambda: AttackerShellLocalization(),
             # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
