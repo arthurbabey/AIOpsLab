@@ -63,7 +63,7 @@ _ROGUE_MARKER = "cat /etc/shadow"
 # can pkill them all with one pattern. Kept as a stable string for the run-command sweep's pkill.
 _HOST_LOOP_MARKER = "ARRIVE_HOST_LOOP"
 
-# Where Falco lives, for post-injection verification (mirrors mcp_servers/falco.py).
+# Where Falco lives, for post-injection verification (mirrors mcp_servers/falco_source.py).
 FALCO_NAMESPACE = os.getenv("FALCO_NAMESPACE", "falco")
 FALCO_SELECTOR = os.getenv("FALCO_SELECTOR", "app.kubernetes.io/name=falco")
 # Set ARRIVE_VERIFY_INJECTION=0 to downgrade verification failures to a warning (debugging only —
