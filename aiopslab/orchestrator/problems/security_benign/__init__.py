@@ -6,4 +6,6 @@ from .security_benign import (
     BenignAdminShellLocalization,
     BenignSecretReadDetection,
     BenignSecretReadLocalization,
+    BenignPrivilegedDetection,
+    BenignPrivilegedLocalization,
 )

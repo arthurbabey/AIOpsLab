@@ -86,6 +86,9 @@ class ProblemRegistry:
             "security_benign_exec-localization-1": lambda: BenignAdminShellLocalization(),
             "security_benign_secret_read-detection-1": lambda: BenignSecretReadDetection(),
             "security_benign_secret_read-localization-1": lambda: BenignSecretReadLocalization(),
+            # OPA-side twin: fires no-privileged-containers, same as security_privileged.
+            "security_benign_privileged-detection-1": lambda: BenignPrivilegedDetection(),
+            "security_benign_privileged-localization-1": lambda: BenignPrivilegedLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

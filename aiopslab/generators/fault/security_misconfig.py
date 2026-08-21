@@ -79,6 +79,72 @@ class SecurityMisconfigInjector(FaultInjector):
             )
             self._set_privileged(service, False)
 
+    # SM.1b - benign_privileged: the BENIGN TWIN of privileged_container.
+    #
+    # Fires the SAME policy (no-privileged-containers) as SM.1, on a workload that has a real
+    # reason for the privilege. A CNI plugin installer writes the plugin binary and its config
+    # onto the node's filesystem; it cannot do that unprivileged, and Istio ships exactly this
+    # as a DaemonSet in the application's own namespace. So the policy is right to fire and the
+    # correct answer is still "no attack" — which is the only thing that stops an agent scoring
+    # perfectly by relaying "OPA fired -> yes".
+    #
+    # Two details are load-bearing:
+    #   * the hostPath mounts. Without them the privilege is decorative and the workload is not
+    #     a credible carrier for it.
+    #   * hostNetwork is OMITTED, though the real istio-cni-node sets it. It would trip
+    #     no-host-network as well, giving the twin a two-policy signature the attack does not
+    #     have — and the agent could then separate them without judging anything. A measurement
+    #     decision, not an oversight.
+    BENIGN_PRIVILEGED_NAME = "istio-cni-node"
+
+    def _benign_privileged_manifest(self) -> dict:
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {
+                "name": self.BENIGN_PRIVILEGED_NAME,
+                "namespace": self.namespace,
+                "labels": {"app": self.BENIGN_PRIVILEGED_NAME,
+                           "k8s-app": self.BENIGN_PRIVILEGED_NAME},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": self.BENIGN_PRIVILEGED_NAME}},
+                "template": {
+                    "metadata": {"labels": {"app": self.BENIGN_PRIVILEGED_NAME}},
+                    "spec": {
+                        "containers": [{
+                            "name": "install-cni",
+                            "image": "docker.io/istio/install-cni:1.20.0",
+                            "command": ["sleep", "infinity"],
+                            "securityContext": {"privileged": True},
+                            "volumeMounts": [
+                                {"name": "cni-bin-dir", "mountPath": "/host/opt/cni/bin"},
+                                {"name": "cni-net-dir", "mountPath": "/host/etc/cni/net.d"},
+                            ],
+                        }],
+                        "volumes": [
+                            {"name": "cni-bin-dir", "hostPath": {"path": "/opt/cni/bin"}},
+                            {"name": "cni-net-dir", "hostPath": {"path": "/etc/cni/net.d"}},
+                        ],
+                    },
+                },
+            },
+        }
+
+    def inject_benign_privileged(self, microservices: list[str] = None):
+        """Deploy a legitimately-privileged CNI installer alongside the app."""
+        print(f"[security_misconfig] benign twin: {self.BENIGN_PRIVILEGED_NAME} "
+              f"(privileged, legitimate) | ns: {self.namespace}")
+        manifest = json.dumps(self._benign_privileged_manifest())
+        print(self.kubectl.exec_command(
+            f"echo '{manifest}' | kubectl apply -f -").strip())
+
+    def recover_benign_privileged(self, microservices: list[str] = None):
+        print(f"[security_misconfig] removing benign twin: {self.BENIGN_PRIVILEGED_NAME}")
+        print(self.kubectl.exec_command(
+            f"kubectl delete daemonset {self.BENIGN_PRIVILEGED_NAME} "
+            f"-n {self.namespace} --ignore-not-found").strip())
+
     # SM.2 - run_as_root (Tier 1): invert no-root-user.rego
     # Sets container securityContext.runAsUser=0. DeathStarBench containers already run as
     # root, so this changes nothing at runtime (non-breaking) — it only makes the hardening

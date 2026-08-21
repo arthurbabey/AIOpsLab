@@ -38,6 +38,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
 from aiopslab.service.apps.socialnet import SocialNetwork
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
+from aiopslab.generators.fault.security_misconfig import SecurityMisconfigInjector
 from aiopslab.generators.workload.wrk import Wrk
 from aiopslab.paths import TARGET_MICROSERVICES
 
@@ -99,6 +100,70 @@ class _BenignTwinBase:
         print("== Fault Recovery ==")
         injector = SecurityRuntimeInjector(namespace=self.namespace)
         injector._recover(fault_type=self.FAULT_TYPE, microservices=[self.faulty_service])
+
+
+class _BenignOpaTwinBase(_BenignTwinBase):
+    """A twin whose sensor is OPA rather than Falco.
+
+    The two sensors need different twins for a structural reason. Falco cannot see intent, so a
+    runtime twin is built by doing the same ACTION for a legitimate reason. OPA reads the spec,
+    and the spec IS the fact — `privileged: true` is `privileged: true` — so intent has nowhere
+    to hide. An OPA twin has to move the field onto a WORKLOAD that has a reason for it.
+
+    That makes the pairing rule sharper, not looser: the twin must fire the same policy as its
+    attack and no other DRIFT policy. Posture findings do not count, because every workload of
+    an un-hardened chart carries them and they discriminate nothing.
+    """
+
+    # OPA policy ids this benign workload is EXPECTED to fire. Must match the attack's set
+    # exactly, or the agent can separate the two without judging anything.
+    EXPECTED_OPA_POLICIES: list[str] = []
+
+    def __init__(self, faulty_service: str = "user-service"):
+        super().__init__(faulty_service=faulty_service)
+        self.ground_truth |= {
+            "detected": False,
+            "detection_surface": ["opa"] if self.EXPECTED_OPA_POLICIES else [],
+            "fault_class": "benign-twin" if self.EXPECTED_OPA_POLICIES else "benign-twin-silent",
+            "opa_control": self.EXPECTED_OPA_POLICIES[0] if self.EXPECTED_OPA_POLICIES else None,
+            "expected_opa_policies": self.EXPECTED_OPA_POLICIES,
+            "expected_falco_rules": [],
+        }
+
+    def inject_fault(self):
+        print(f"== Fault Injection (BENIGN TWIN: {self.BENIGN_ACTIVITY}) ==")
+        injector = SecurityMisconfigInjector(namespace=self.namespace)
+        injector._inject(fault_type=self.FAULT_TYPE, microservices=[self.faulty_service])
+
+    def recover_fault(self):
+        print("== Fault Recovery ==")
+        injector = SecurityMisconfigInjector(namespace=self.namespace)
+        injector._recover(fault_type=self.FAULT_TYPE, microservices=[self.faulty_service])
+
+
+# ---- twin C: legitimately-privileged CNI installer — the OPA-side twin of SM.1 ----
+class _BenignPrivileged(_BenignOpaTwinBase):
+    FAULT_TYPE = "benign_privileged"
+    BENIGN_ACTIVITY = (
+        "CNI plugin installer DaemonSet running privileged to write the plugin binary and "
+        "config onto the node filesystem"
+    )
+    # Exactly the policy security_privileged fires, and only that one. hostNetwork is omitted
+    # from the manifest for this reason even though the real istio-cni-node sets it.
+    EXPECTED_OPA_POLICIES = ["arrive-no-privileged-containers"]
+    RQ2_PAIR = "security_privileged-detection-1"
+
+
+class BenignPrivilegedDetection(_BenignPrivileged, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignPrivileged.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+class BenignPrivilegedLocalization(_BenignPrivileged, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignPrivileged.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
 
 
 # ---- twin A: admin debug shell — the working RQ2 twin ----
