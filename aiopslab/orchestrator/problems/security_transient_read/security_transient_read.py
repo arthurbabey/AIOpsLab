@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""SR.2 — TRANSIENT credential reads on SocialNetwork (Falco-only, the clean coverage fault).
+"""SR.2 — TRANSIENT credential reads on HotelReservation (Falco-only, the clean coverage fault).
 
 The controlled counterpart to `security_rogue_shell`: same intrusion (a process reading
-/etc/shadow in `user-service`), but delivered as **transient one-shot reads** with NO lingering
+/etc/shadow in `user`), but delivered as **transient one-shot reads** with NO lingering
 process in the pod (a host-side loop execs a `cat` that exits immediately each time). So:
 
 - `ps` inside the pod finds **nothing** — the process is already gone → a shell agent (`base`) is
@@ -21,7 +21,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditDetectionTask,
     SecurityAuditLocalizationTask,
 )
-from aiopslab.service.apps.socialnet import SocialNetwork
+from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
 from aiopslab.generators.workload.wrk import Wrk
@@ -35,14 +35,14 @@ from aiopslab.orchestrator.problems.k8s_target_port_misconfig.helpers import (
 class TransientReadBaseTask:
     FAULT_TYPE = "transient_read"
 
-    def __init__(self, faulty_service: str = "user-service"):
-        self.app = SocialNetwork()
+    def __init__(self, faulty_service: str = "user"):
+        self.app = HotelReservation()
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = faulty_service
         self.payload_script = (
             TARGET_MICROSERVICES
-            / "socialNetwork/wrk2/scripts/social-network/compose-post.lua"
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
         )
         self.ground_truth = {
             "detected": True,
@@ -60,11 +60,10 @@ class TransientReadBaseTask:
 
     def start_workload(self):
         print("== Start Workload ==")
-        frontend_url = get_frontend_url(self.app)
-        wrk = Wrk(rate=10, dist="exp", connections=2, duration=10, threads=2)
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
         wrk.start_workload(
             payload_script=self.payload_script,
-            url=f"{frontend_url}/wrk2-api/post/compose",
+            url=get_frontend_url(self.app),
         )
 
     def inject_fault(self):
@@ -79,12 +78,12 @@ class TransientReadBaseTask:
 
 
 class TransientReadDetection(TransientReadBaseTask, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         TransientReadBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
 
 
 class TransientReadLocalization(TransientReadBaseTask, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         TransientReadBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")

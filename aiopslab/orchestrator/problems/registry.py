@@ -46,17 +46,17 @@ class ProblemRegistry:
             # Security drift — OPA-visible checking-complexity ladder (RQ3), Phase A
             # Tier 0: single obvious object
             "security_privileged-detection-1": lambda: PrivilegedContainerDetection(
-                faulty_service="user-service"
+                faulty_service="user"
             ),
             "security_privileged-localization-1": lambda: PrivilegedContainerLocalization(
-                faulty_service="user-service"
+                faulty_service="user"
             ),
             # Tier 1: single subtle field (runAsUser: 0)
             "security_run_as_root-detection-1": lambda: RunAsRootDetection(
-                faulty_service="user-service"
+                faulty_service="user"
             ),
             "security_run_as_root-localization-1": lambda: RunAsRootLocalization(
-                faulty_service="user-service"
+                faulty_service="user"
             ),
             # Tier 2: needle-in-haystack (1 wildcard Role among ~60 benign)
             "security_wildcard_rbac-detection-1": lambda: WildcardRbacDetection(),

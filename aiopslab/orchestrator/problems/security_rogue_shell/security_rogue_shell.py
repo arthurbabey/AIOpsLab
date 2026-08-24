@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""SR.1 — rogue process reading credentials on SocialNetwork (Falco-visible runtime drift).
+"""SR.1 — rogue process reading credentials on HotelReservation (Falco-visible runtime drift).
 
 The first fault where a tool is load-bearing for ACCURACY, not just cost. A rogue process inside
-`user-service` repeatedly reads /etc/shadow — a syscall-level intrusion that changes no spec and
+`user` repeatedly reads /etc/shadow — a syscall-level intrusion that changes no spec and
 produces no telemetry symptom, so `base` (shell/logs/metrics/specs) and `+OPA` (declarative state)
 are both BLIND. Only `+Falco` (runtime monitoring) sees it, via the default "Read sensitive file
 untrusted" rule (MITRE T1555, Credential Access).
@@ -17,7 +17,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditDetectionTask,
     SecurityAuditLocalizationTask,
 )
-from aiopslab.service.apps.socialnet import SocialNetwork
+from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
 from aiopslab.generators.workload.wrk import Wrk
@@ -31,14 +31,14 @@ from aiopslab.orchestrator.problems.k8s_target_port_misconfig.helpers import (
 class RogueShellBaseTask:
     FAULT_TYPE = "rogue_shell"
 
-    def __init__(self, faulty_service: str = "user-service"):
-        self.app = SocialNetwork()
+    def __init__(self, faulty_service: str = "user"):
+        self.app = HotelReservation()
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = faulty_service
         self.payload_script = (
             TARGET_MICROSERVICES
-            / "socialNetwork/wrk2/scripts/social-network/compose-post.lua"
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
         )
         self.ground_truth = {
             "detected": True,
@@ -56,11 +56,10 @@ class RogueShellBaseTask:
 
     def start_workload(self):
         print("== Start Workload ==")
-        frontend_url = get_frontend_url(self.app)
-        wrk = Wrk(rate=10, dist="exp", connections=2, duration=10, threads=2)
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
         wrk.start_workload(
             payload_script=self.payload_script,
-            url=f"{frontend_url}/wrk2-api/post/compose",
+            url=get_frontend_url(self.app),
         )
 
     def inject_fault(self):
@@ -75,12 +74,12 @@ class RogueShellBaseTask:
 
 
 class RogueShellDetection(RogueShellBaseTask, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RogueShellBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
 
 
 class RogueShellLocalization(RogueShellBaseTask, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RogueShellBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")

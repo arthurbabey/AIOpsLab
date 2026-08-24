@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""SM.2 — run-as-root escalation on SocialNetwork (OPA-visible security drift).
+"""SM.2 — run-as-root escalation on HotelReservation (OPA-visible security drift).
 
 Tier-1 rung of the §8.1 ladder: single-object, but a *subtle* field. Inverts
 ``no-root-user.rego`` by setting a container's ``securityContext.runAsUser: 0``. The
@@ -14,7 +14,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditDetectionTask,
     SecurityAuditLocalizationTask,
 )
-from aiopslab.service.apps.socialnet import SocialNetwork
+from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_misconfig import SecurityMisconfigInjector
 from aiopslab.generators.workload.wrk import Wrk
@@ -28,14 +28,14 @@ from aiopslab.orchestrator.problems.k8s_target_port_misconfig.helpers import (
 class RunAsRootBaseTask:
     FAULT_TYPE = "run_as_root"
 
-    def __init__(self, faulty_service: str = "user-service"):
-        self.app = SocialNetwork()
+    def __init__(self, faulty_service: str = "user"):
+        self.app = HotelReservation()
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = faulty_service
         self.payload_script = (
             TARGET_MICROSERVICES
-            / "socialNetwork/wrk2/scripts/social-network/compose-post.lua"
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
         )
         self.ground_truth = {
             "detected": True,
@@ -51,11 +51,10 @@ class RunAsRootBaseTask:
 
     def start_workload(self):
         print("== Start Workload ==")
-        frontend_url = get_frontend_url(self.app)
-        wrk = Wrk(rate=10, dist="exp", connections=2, duration=10, threads=2)
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
         wrk.start_workload(
             payload_script=self.payload_script,
-            url=f"{frontend_url}/wrk2-api/post/compose",
+            url=get_frontend_url(self.app),
         )
 
     def inject_fault(self):
@@ -70,12 +69,12 @@ class RunAsRootBaseTask:
 
 
 class RunAsRootDetection(RunAsRootBaseTask, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RunAsRootBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth)
 
 
 class RunAsRootLocalization(RunAsRootBaseTask, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RunAsRootBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth)

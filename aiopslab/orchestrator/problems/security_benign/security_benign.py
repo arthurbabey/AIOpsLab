@@ -35,7 +35,6 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditDetectionTask,
     SecurityAuditLocalizationTask,
 )
-from aiopslab.service.apps.socialnet import SocialNetwork
 from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
@@ -57,14 +56,14 @@ class _BenignTwinBase:
     # Problem id of the attack this twin is matched against, for RQ2 precision. None == unpaired.
     RQ2_PAIR: str | None = None
 
-    def __init__(self, faulty_service: str = "user-service"):
-        self.app = SocialNetwork()
+    def __init__(self, faulty_service: str = "user"):
+        self.app = HotelReservation()
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = faulty_service
         self.payload_script = (
             TARGET_MICROSERVICES
-            / "socialNetwork/wrk2/scripts/social-network/compose-post.lua"
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
         )
         self.ground_truth = {
             "detected": False,            # benign — the correct answer is "No" / []
@@ -85,11 +84,10 @@ class _BenignTwinBase:
 
     def start_workload(self):
         print("== Start Workload ==")
-        frontend_url = get_frontend_url(self.app)
-        wrk = Wrk(rate=10, dist="exp", connections=2, duration=10, threads=2)
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
         wrk.start_workload(
             payload_script=self.payload_script,
-            url=f"{frontend_url}/wrk2-api/post/compose",
+            url=get_frontend_url(self.app),
         )
 
     def inject_fault(self):
@@ -239,13 +237,13 @@ class _BenignAdminShell(_BenignTwinBase):
 
 
 class BenignAdminShellDetection(_BenignAdminShell, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         _BenignAdminShell.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
 
 
 class BenignAdminShellLocalization(_BenignAdminShell, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         _BenignAdminShell.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
 
@@ -263,12 +261,12 @@ class _BenignSecretRead(_BenignTwinBase):
 
 
 class BenignSecretReadDetection(_BenignSecretRead, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         _BenignSecretRead.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
 
 
 class BenignSecretReadLocalization(_BenignSecretRead, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         _BenignSecretRead.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")

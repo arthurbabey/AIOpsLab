@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""SM.4 — RBAC privilege-escalation primitive on SocialNetwork (JUDGMENT hard-candidate).
+"""SM.4 — RBAC privilege-escalation primitive on HotelReservation (JUDGMENT hard-candidate).
 
 The controlled counterpart to `security_wildcard_rbac`: identical structure (one over-permissive
 Role among ~60 benign ones, bound to a workload's ServiceAccount), but the over-permission is a
@@ -19,7 +19,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditDetectionTask,
     SecurityAuditLocalizationTask,
 )
-from aiopslab.service.apps.socialnet import SocialNetwork
+from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_misconfig import SecurityMisconfigInjector
 from aiopslab.generators.workload.wrk import Wrk
@@ -34,14 +34,14 @@ class RbacEscalationBaseTask:
     FAULT_TYPE = "rbac_escalation"
     ESC_ROLE = "auth-delegator"
 
-    def __init__(self, faulty_service: str = "user-service"):
-        self.app = SocialNetwork()
+    def __init__(self, faulty_service: str = "user"):
+        self.app = HotelReservation()
         self.kubectl = KubeCtl()
         self.namespace = self.app.namespace
         self.faulty_service = faulty_service
         self.payload_script = (
             TARGET_MICROSERVICES
-            / "socialNetwork/wrk2/scripts/social-network/compose-post.lua"
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
         )
         self.ground_truth = {
             "detected": True,
@@ -62,11 +62,10 @@ class RbacEscalationBaseTask:
 
     def start_workload(self):
         print("== Start Workload ==")
-        frontend_url = get_frontend_url(self.app)
-        wrk = Wrk(rate=10, dist="exp", connections=2, duration=10, threads=2)
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
         wrk.start_workload(
             payload_script=self.payload_script,
-            url=f"{frontend_url}/wrk2-api/post/compose",
+            url=get_frontend_url(self.app),
         )
 
     def inject_fault(self):
@@ -81,12 +80,12 @@ class RbacEscalationBaseTask:
 
 
 class RbacEscalationDetection(RbacEscalationBaseTask, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RbacEscalationBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth)
 
 
 class RbacEscalationLocalization(RbacEscalationBaseTask, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
+    def __init__(self, faulty_service: str = "user"):
         RbacEscalationBaseTask.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth)
