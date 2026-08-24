@@ -36,6 +36,7 @@ from aiopslab.orchestrator.tasks.security_audit import (
     SecurityAuditLocalizationTask,
 )
 from aiopslab.service.apps.socialnet import SocialNetwork
+from aiopslab.service.apps.hotelres import HotelReservation
 from aiopslab.service.kubectl import KubeCtl
 from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
 from aiopslab.generators.fault.security_misconfig import SecurityMisconfigInjector
@@ -121,6 +122,13 @@ class _BenignOpaTwinBase(_BenignTwinBase):
 
     def __init__(self, faulty_service: str = "user-service"):
         super().__init__(faulty_service=faulty_service)
+        # HotelReservation: no baseline drift finding, so a fault-free problem really is one.
+        self.app = HotelReservation()
+        self.namespace = self.app.namespace
+        self.payload_script = (
+            TARGET_MICROSERVICES
+            / "hotelReservation/wrk2/scripts/hotel-reservation/mixed-workload_type_1.lua"
+        )
         self.ground_truth |= {
             "detected": False,
             "detection_surface": ["opa"] if self.EXPECTED_OPA_POLICIES else [],
@@ -129,6 +137,12 @@ class _BenignOpaTwinBase(_BenignTwinBase):
             "expected_opa_policies": self.EXPECTED_OPA_POLICIES,
             "expected_falco_rules": [],
         }
+
+    def start_workload(self):
+        print("== Start Workload ==")
+        wrk = Wrk(rate=100, dist="exp", connections=2, duration=10, threads=2)
+        wrk.start_workload(payload_script=self.payload_script,
+                           url=get_frontend_url(self.app))
 
     def inject_fault(self):
         print(f"== Fault Injection (BENIGN TWIN: {self.BENIGN_ACTIVITY}) ==")
@@ -163,6 +177,54 @@ class BenignPrivilegedDetection(_BenignPrivileged, SecurityAuditDetectionTask):
 class BenignPrivilegedLocalization(_BenignPrivileged, SecurityAuditLocalizationTask):
     def __init__(self, faulty_service: str = "user-service"):
         _BenignPrivileged.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+# ---- twin C': the same workload with its identity removed ----
+class _BenignPrivilegedAnon(_BenignOpaTwinBase):
+    FAULT_TYPE = "benign_privileged_anon"
+    BENIGN_ACTIVITY = (
+        "unbranded CNI plugin installer DaemonSet running privileged to write the plugin binary "
+        "and config onto the node filesystem"
+    )
+    EXPECTED_OPA_POLICIES = ["arrive-no-privileged-containers"]
+    RQ2_PAIR = "security_privileged-detection-1"
+
+
+class BenignPrivilegedAnonDetection(_BenignPrivilegedAnon, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignPrivilegedAnon.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+class BenignPrivilegedAnonLocalization(_BenignPrivilegedAnon, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignPrivilegedAnon.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+# ---- twin D: legitimately root node exporter — the OPA-side twin of SM.2 ----
+class _BenignRunAsRoot(_BenignOpaTwinBase):
+    FAULT_TYPE = "benign_run_as_root"
+    BENIGN_ACTIVITY = (
+        "node metrics exporter DaemonSet running as root to read the host's /proc and /sys"
+    )
+    # Exactly the policy security_run_as_root fires, and only that one — and via the same deny
+    # rule, container-level runAsUser: 0, so the two halves are indistinguishable by message
+    # shape as well as by policy.
+    EXPECTED_OPA_POLICIES = ["arrive-no-root-user"]
+    RQ2_PAIR = "security_run_as_root-detection-1"
+
+
+class BenignRunAsRootDetection(_BenignRunAsRoot, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignRunAsRoot.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+class BenignRunAsRootLocalization(_BenignRunAsRoot, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignRunAsRoot.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
 
 

@@ -8,4 +8,8 @@ from .security_benign import (
     BenignSecretReadLocalization,
     BenignPrivilegedDetection,
     BenignPrivilegedLocalization,
+    BenignRunAsRootDetection,
+    BenignRunAsRootLocalization,
+    BenignPrivilegedAnonDetection,
+    BenignPrivilegedAnonLocalization,
 )

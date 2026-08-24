@@ -96,26 +96,38 @@ class SecurityMisconfigInjector(FaultInjector):
     #     have — and the agent could then separate them without judging anything. A measurement
     #     decision, not an oversight.
     BENIGN_PRIVILEGED_NAME = "istio-cni-node"
+    # Same workload with every brand signal removed: name, image and labels say nothing about
+    # who ships it. Structure — DaemonSet, privileged, host CNI mounts — is identical, so a
+    # verdict that changes between the two was driven by recognition, not by the spec.
+    BENIGN_PRIVILEGED_ANON_NAME = "cni-installer"
 
-    def _benign_privileged_manifest(self) -> dict:
+    def _privileged_daemonset(self, name: str, container: str, image: str) -> dict:
         return {
             "apiVersion": "apps/v1",
             "kind": "DaemonSet",
             "metadata": {
-                "name": self.BENIGN_PRIVILEGED_NAME,
+                "name": name,
                 "namespace": self.namespace,
-                "labels": {"app": self.BENIGN_PRIVILEGED_NAME,
-                           "k8s-app": self.BENIGN_PRIVILEGED_NAME},
+                "labels": {"app": name, "k8s-app": name},
             },
             "spec": {
-                "selector": {"matchLabels": {"app": self.BENIGN_PRIVILEGED_NAME}},
+                "selector": {"matchLabels": {"app": name}},
                 "template": {
-                    "metadata": {"labels": {"app": self.BENIGN_PRIVILEGED_NAME}},
+                    "metadata": {"labels": {"app": name}},
                     "spec": {
                         "containers": [{
-                            "name": "install-cni",
-                            "image": "docker.io/istio/install-cni:1.20.0",
-                            "command": ["sleep", "infinity"],
+                            "name": container,
+                            "image": image,
+                            # Reads both mounts on a loop and logs it. Read-only on purpose:
+                            # writing into a node's real /opt/cni/bin could break cluster
+                            # networking. No single quotes — the manifest is shipped through
+                            # echo '<json>' | kubectl apply -f -.
+                            "command": ["/bin/sh", "-c",
+                                        "while true; do "
+                                        "echo [install-cni] verifying CNI plugin dir and config; "
+                                        "ls /host/opt/cni/bin >/dev/null 2>&1; "
+                                        "ls /host/etc/cni/net.d >/dev/null 2>&1; "
+                                        "sleep 30; done"],
                             "securityContext": {"privileged": True},
                             "volumeMounts": [
                                 {"name": "cni-bin-dir", "mountPath": "/host/opt/cni/bin"},
@@ -130,6 +142,26 @@ class SecurityMisconfigInjector(FaultInjector):
                 },
             },
         }
+
+    def _benign_privileged_manifest(self) -> dict:
+        return self._privileged_daemonset(
+            self.BENIGN_PRIVILEGED_NAME, "install-cni", "docker.io/istio/install-cni:1.20.0")
+
+    def _benign_privileged_anon_manifest(self) -> dict:
+        return self._privileged_daemonset(
+            self.BENIGN_PRIVILEGED_ANON_NAME, "install-cni", "alpine:3.19")
+
+    def inject_benign_privileged_anon(self, microservices: list[str] = None):
+        print(f"[security_misconfig] benign twin (anonymised): "
+              f"{self.BENIGN_PRIVILEGED_ANON_NAME} | ns: {self.namespace}")
+        manifest = json.dumps(self._benign_privileged_anon_manifest())
+        print(self.kubectl.exec_command(f"echo '{manifest}' | kubectl apply -f -").strip())
+
+    def recover_benign_privileged_anon(self, microservices: list[str] = None):
+        print(f"[security_misconfig] removing: {self.BENIGN_PRIVILEGED_ANON_NAME}")
+        print(self.kubectl.exec_command(
+            f"kubectl delete daemonset {self.BENIGN_PRIVILEGED_ANON_NAME} "
+            f"-n {self.namespace} --ignore-not-found").strip())
 
     def inject_benign_privileged(self, microservices: list[str] = None):
         """Deploy a legitimately-privileged CNI installer alongside the app."""
@@ -191,6 +223,74 @@ class SecurityMisconfigInjector(FaultInjector):
                     f"--type=strategic -p '{json.dumps(patch)}'"
                 )
                 print(self.kubectl.exec_command(cmd).strip())
+
+    # SM.2b - benign_run_as_root: the BENIGN TWIN of run_as_root.
+    #
+    # Fires the SAME policy (no-root-user) and the SAME deny rule as SM.2 — container-level
+    # securityContext.runAsUser: 0 — on a workload that needs it. A node metrics exporter reads
+    # the host's /proc and /sys; those are root-owned, so it cannot collect anything as a
+    # non-root user. Prometheus documents this and kube-prometheus-stack ships node-exporter as
+    # a root DaemonSet by default.
+    #
+    # Same three rules as the privileged twin, learned the same way:
+    #   * the hostPath mounts are load-bearing. They are what makes root NECESSARY rather than
+    #     decorative, and they are what an agent can point at when judging legitimacy — on the
+    #     privileged twin the agent cited the mount paths verbatim.
+    #   * hostPID and hostNetwork are OMITTED, though real node-exporter sets both. They would
+    #     trip no-host-network as well, giving the twin a two-policy signature the attack does
+    #     not have, and the agent could separate the pair without judging anything.
+    #   * the image tag is pinned, so no-latest-tag stays quiet.
+    BENIGN_RUN_AS_ROOT_NAME = "node-exporter"
+
+    def _benign_run_as_root_manifest(self) -> dict:
+        name = self.BENIGN_RUN_AS_ROOT_NAME
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {
+                "name": name,
+                "namespace": self.namespace,
+                "labels": {"app": name, "k8s-app": name},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": name}},
+                "template": {
+                    "metadata": {"labels": {"app": name}},
+                    "spec": {
+                        "containers": [{
+                            "name": name,
+                            "image": "prom/node-exporter:v1.7.0",
+                            "args": ["--path.procfs=/host/proc", "--path.sysfs=/host/sys"],
+                            # Container-level, matching the deny rule SM.2 trips. Pod-level
+                            # would fire a different rule and a different message.
+                            "securityContext": {"runAsUser": 0},
+                            "volumeMounts": [
+                                {"name": "proc", "mountPath": "/host/proc", "readOnly": True},
+                                {"name": "sys", "mountPath": "/host/sys", "readOnly": True},
+                            ],
+                        }],
+                        "volumes": [
+                            {"name": "proc", "hostPath": {"path": "/proc"}},
+                            {"name": "sys", "hostPath": {"path": "/sys"}},
+                        ],
+                    },
+                },
+            },
+        }
+
+    def inject_benign_run_as_root(self, microservices: list[str] = None):
+        """Deploy a node metrics exporter that legitimately runs as root."""
+        print(f"[security_misconfig] benign twin: {self.BENIGN_RUN_AS_ROOT_NAME} "
+              f"(runAsUser 0, legitimate) | ns: {self.namespace}")
+        manifest = json.dumps(self._benign_run_as_root_manifest())
+        print(self.kubectl.exec_command(
+            f"echo '{manifest}' | kubectl apply -f -").strip())
+
+    def recover_benign_run_as_root(self, microservices: list[str] = None):
+        print(f"[security_misconfig] removing benign twin: {self.BENIGN_RUN_AS_ROOT_NAME}")
+        print(self.kubectl.exec_command(
+            f"kubectl delete daemonset {self.BENIGN_RUN_AS_ROOT_NAME} "
+            f"-n {self.namespace} --ignore-not-found").strip())
 
     # SM.3 - wildcard_rbac (Tier 2): invert rbac-least-privilege.rego, needle-in-haystack.
     # ONE over-permissive Role hides among many heterogeneous, plausible-looking Roles; it is bound
