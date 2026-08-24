@@ -92,9 +92,6 @@ class ProblemRegistry:
             # OPA-side twin: fires no-root-user, same deny rule as security_run_as_root.
             "security_benign_run_as_root-detection-1": lambda: BenignRunAsRootDetection(),
             "security_benign_run_as_root-localization-1": lambda: BenignRunAsRootLocalization(),
-            # identity-stripped control for security_benign_privileged
-            "security_benign_privileged_anon-detection-1": lambda: BenignPrivilegedAnonDetection(),
-            "security_benign_privileged_anon-localization-1": lambda: BenignPrivilegedAnonLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

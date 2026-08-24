@@ -178,29 +178,6 @@ class BenignPrivilegedLocalization(_BenignPrivileged, SecurityAuditLocalizationT
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
 
 
-# ---- twin C': the same workload with its identity removed ----
-class _BenignPrivilegedAnon(_BenignOpaTwinBase):
-    FAULT_TYPE = "benign_privileged_anon"
-    BENIGN_ACTIVITY = (
-        "unbranded CNI plugin installer DaemonSet running privileged to write the plugin binary "
-        "and config onto the node filesystem"
-    )
-    EXPECTED_OPA_POLICIES = ["arrive-no-privileged-containers"]
-    RQ2_PAIR = "security_privileged-detection-1"
-
-
-class BenignPrivilegedAnonDetection(_BenignPrivilegedAnon, SecurityAuditDetectionTask):
-    def __init__(self, faulty_service: str = "user-service"):
-        _BenignPrivilegedAnon.__init__(self, faulty_service=faulty_service)
-        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
-
-
-class BenignPrivilegedAnonLocalization(_BenignPrivilegedAnon, SecurityAuditLocalizationTask):
-    def __init__(self, faulty_service: str = "user-service"):
-        _BenignPrivilegedAnon.__init__(self, faulty_service=faulty_service)
-        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
-
-
 # ---- twin D: legitimately root node exporter — the OPA-side twin of SM.2 ----
 class _BenignRunAsRoot(_BenignOpaTwinBase):
     FAULT_TYPE = "benign_run_as_root"
