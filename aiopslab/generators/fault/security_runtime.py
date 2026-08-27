@@ -46,6 +46,96 @@ TTY mechanics (why the twin used to fire nothing): Falco's "Terminal shell in co
 `-i -t` AND own a real PTY — see `_start_host_loop(tty=True)`. Because that is easy to get wrong
 and fails *silently*, every runtime injector now verifies against Falco that its expected rules
 actually fired, and raises if not (a mislabelled episode is worse than a failed one).
+
+S7 — crypto-miner behaviour: the TWO-SURFACE fault (and why it breaks this file's mould)
+----------------------------------------------------------------------------------------
+`crypto_miner` / `benign_cpu_job` are the S7 pair from `reports/BENCHMARK_IDEAS.md` §2. Every
+OTHER fault in this module is Falco-ONLY by construction — the whole point of the module is the
+regime where telemetry is blind. S7 is deliberately the exception: it is visible on TWO surfaces
+at once, and for two DIFFERENT reasons.
+
+    Falco     sees a miner-shaped process    -> "this is an intrusion"   (T1496, Impact)
+    telemetry sees one core pegged at 100%   -> "this is a hot workload" (a reliability symptom)
+
+That divergence is the experiment. An agent that stops at "CPU is high" lands on a *reliability*
+diagnosis and, on the severity question, on a *reliability* severity — which is the wrong answer
+for resource hijacking even though the observation that produced it was correct. A future reader
+should not generalise this file's "runtime == Falco-only" rule to S7; the ground truth carries
+`detection_surface: ["falco", "telemetry"]` for exactly this reason.
+
+Re-executed every 8s, NOT one continuous process — and the reason is a bug this file's first
+version actually shipped with, not a design preference stated in advance. Falco's stratum rule
+matches `spawned_process`, i.e. an execve event: edge-triggered, fires once per exec, never again
+while the same process just keeps running. Injection happens inside `init_problem()`, BEFORE the
+client calls `orchestrator.session.start()` and sets the Falco session floor (`ARRIVE_SESSION_START`
+— see `mcp_servers/README.md`). A version of this injector that `kubectl exec`'d ONE long-lived
+background process fired exactly one alert, at injection time, strictly before the floor — so it
+existed, but no query the agent was allowed to make could ever see it. `sensor_probe` (a fresh,
+post-episode query) found 0 alerts too, for the same reason. The agent read Falco correctly; there
+was nothing left in its window to read. Confirmed live: `security_crypto_miner-detection-1` ran
+end-to-end, `_verify_falco` passed at injection, and the recorded episode still shows
+`sensor_fired: false` and zero alerts of any kind.
+
+The fix makes S7 behave like every OTHER injector in this file: `crypto_miner` and
+`benign_cpu_job` now run through `_start_host_loop`, the same HOST-side re-exec loop
+`rogue_shell`/`attacker_shell`/the benign shell twins already use, so a fresh execve — and a fresh
+alert — lands inside the agent's window every ~8s for the whole episode. What is genuinely S7-
+specific is that each cycle must ALSO keep the core busy for most of that 8s, or the "sustained
+CPU" telemetry signal disappears between cycles — see `_cpu_loop_action` for how that is done
+without leaving anything backgrounded in the pod.
+
+Which Falco rules, and the two constraints that decided the mechanism
+--------------------------------------------------------------------
+Verified against the pinned upstream ruleset (chart `falco-9.1.0` / Falco 0.44.1, engine 0.62.0;
+rules read from `falcosecurity/rules` at tags `falco-rules-5.1.0` and `falco-sandbox-rules-6.1.0`),
+NOT from memory. Three miner rules exist upstream, and only one of them is usable here:
+
+  1. "Detect crypto miners using the Stratum protocol"  -> USED, and required.
+     `spawned_process and proc.cmdline contains "stratum+tcp"` (or stratum2+tcp/+ssl). A pure
+     command-line substring match: no network contact, no mining, nothing to fake. We give the
+     simulated miner a real-looking pool URI in its argv and the rule fires on the literal string
+     the rule's authors chose to key on. Enabled by default. priority CRITICAL, tags T1496.
+
+  2. "Known Cryptominer Process Executed"               -> NOT USED. Structurally SHADOWED.
+     `spawned_process and proc.name in (miner_binaries)` (xmrig, minerd, cgminer, ...). The
+     simulated miner DOES satisfy it — Falco records `proc.name=xmrig` on the execve — and it is
+     loaded and enabled, and it still never reports. Falco's default `rule_matching: first`
+     (falco.yaml, confirmed on the deployed pod) reports only the FIRST rule that matches a given
+     event, and the stratum rule sits earlier in falco-sandbox_rules.yaml (line 1488 vs 1826). So
+     the two miner rules can never both fire on one process exec: whichever comes first wins.
+     Measured, not reasoned about — the injection was run with both rules loaded and only the
+     stratum rule appeared. The ground truth therefore asserts ONE rule, and this one is recorded
+     as `shadowed_falco_rules` so a future reader does not "fix" its absence. Making it reachable
+     would mean setting `rule_matching: all`, which changes the alert volume for every arm and is
+     a campaign decision, not an injector one. Nothing is lost by leaving it shadowed: both rules
+     are CRITICAL/T1496 and say the same thing.
+     (It also exists only at sandbox-rules >= 6.1.0, added in that single tag.)
+
+  3. "Detect outbound connections to common miner pool ports" -> NOT USED. Cannot be fired.
+     This is the rule the S7 brief assumed we would trip with a local sink on a miner port, and
+     it is structurally impossible to trip benignly. Its macro chain is
+         net_miner_pool = connect/sendto/sendmsg
+                          AND fd.net != "127.0.0.0/8" AND NOT fd.snet in (rfc_1918_addresses)
+                          AND (fd.sport in (miner_ports) AND fd.sip.name in (miner_domains)) | ...
+     so the destination must be (a) OUTSIDE RFC1918 — which excludes every ClusterIP/pod IP a
+     sink of ours could have — and (b) reverse-resolve to a name on a hard-coded list of REAL
+     mining pools. Firing it therefore requires contacting an actual pool, which this project
+     will not do. It is also `enabled: false` upstream by default. Consequence: a benign network
+     sink on port 3333 would fire NOTHING on any surface the benchmark reads, so it is not built
+     — the pool endpoint lives in the miner's argv (where rule 1 reads it) and nowhere else.
+
+RULESET PREREQUISITE — read before running S7. All three miner rules live in
+`falco-sandbox_rules.yaml` (`maturity_sandbox`). The chart installs `falco-rules:5` ONLY, so on
+the Falco this project deploys today **none of them is loaded** and S7 cannot fire. Running S7
+requires adding the sandbox ruleset to the Falco install, e.g.
+    --set falcoctl.config.artifact.install.refs="{falco-rules:5,falco-sandbox-rules:6.1.0}"
+    --set falcoctl.config.artifact.follow.refs="{falco-rules:5,falco-sandbox-rules:6.1.0}"
+    --set "falco.rules_files={/etc/falco/falco_rules.yaml,/etc/falco/falco-sandbox_rules.yaml,\
+                              /etc/falco/falco_rules.local.yaml,/etc/falco/rules.d}"
+That is a cluster-wide change (it adds the whole sandbox tier to every arm's alert surface and to
+falco_l3's `possibility_space`), so it is a campaign decision, not an injector detail.
+`_require_miner_rules_loaded()` checks for it up front and fails with that message rather than
+letting the episode die later in an opaque "rule did not fire".
 """
 
 import json
@@ -62,6 +152,48 @@ _ROGUE_MARKER = "cat /etc/shadow"
 # marker on every host-side loop's cmdline (transient attack + benign twins) so recovery/cleanup
 # can pkill them all with one pattern. Kept as a stable string for the run-command sweep's pkill.
 _HOST_LOOP_MARKER = "ARRIVE_HOST_LOOP"
+
+# ---- S7 crypto-miner pair (see the module docstring for the rule verification) ----------------
+# Markers on the in-pod process cmdlines so recovery can find them. The pkill patterns below spell
+# them with a bracket class (ARRIVE_MINER[_]SIM) so the pkill command's OWN cmdline — and its
+# parent `sh -c` — do not match the pattern and kill the recovery shell mid-sweep.
+_MINER_MARKER = "ARRIVE_MINER_SIM"
+_CPU_JOB_MARKER = "ARRIVE_CPU_JOB"
+
+# The pool endpoint. Nothing ever connects to it: `.invalid` is RFC 2606's guaranteed-unresolvable
+# TLD, so even an accidental lookup fails locally and can never reach a real mining pool. Port 3333
+# is on Falco's `miner_ports` list — carried for realism, not for detection (that rule is
+# unfireable here; see the docstring).
+#
+# It is written SPLIT (`$S+tcp://`, with S=stratum assigned in the pod) and that is load-bearing,
+# not a style choice. Falco's rule is `proc.cmdline contains "stratum+tcp"` and it is tagged
+# `host` as well as `container`, so ANY process whose command line carries the literal substring
+# fires it — including the injector's own `kubectl exec ...` on the host and the in-pod `sh -c`
+# that launches the miner. Measured, before this was split: 8 alerts, of which 2 were the
+# HARNESS's own host-side processes (proc.name=kubectl / sh, no k8s.pod.name) and 6 were launcher
+# shells rather than the miner. Two things were wrong with that. The harness was writing its own
+# fingerprints into the evidence stream the agent reads, and `_falco_rules_fired` cannot filter
+# host alerts out by pod (they carry no pod name), so verification could have passed on the
+# harness's noise while the in-pod miner failed silently. Splitting the literal means only the
+# fully-expanded argv of the miner's own exec chain contains it.
+_MINER_POOL_SPLIT = "$S+tcp://pool.arrive-sim.invalid:3333"
+_MINER_POOL_URI = "stratum+tcp://pool.arrive-sim.invalid:3333"   # what the process ends up with
+
+# The miner's process name is produced by SYMLINKING a shell to /tmp/xmrig and exec'ing that path:
+# Linux sets `comm` from `kbasename(bprm->filename)` — the path handed to execve, not the resolved
+# symlink target — so `proc.name` becomes "xmrig" (in Falco's `miner_binaries`) while the inode
+# actually executed is still the base image's /bin/sh. That last part is the point: a `cp` would
+# give the same name but make the exe an upper-layer file, which fires the stable rule "Drop and
+# execute new binary in container" — an extra signature the benign twin has no way to match. The
+# symlink keeps `proc.is_exe_upper_layer=false` and the pair's non-miner signature identical.
+_MINER_EXE = "/tmp/xmrig"
+# The twin's name is built the same way, so the two halves differ ONLY in miner-specific strings.
+# Kept under 15 chars: `comm` is truncated at TASK_COMM_LEN-1 and a truncated name would not match
+# any list at all (which for the twin would hide a real failure rather than cause one).
+_CPU_JOB_EXE = "/tmp/analytics-job"
+
+_MINER_RULE_STRATUM = "Detect crypto miners using the Stratum protocol"
+_MINER_RULE_KNOWN_BINARY = "Known Cryptominer Process Executed"
 
 # Where Falco lives, for post-injection verification (mirrors mcp_servers/falco_source.py).
 FALCO_NAMESPACE = os.getenv("FALCO_NAMESPACE", "falco")
@@ -169,6 +301,18 @@ class SecurityRuntimeInjector(FaultInjector):
             os.close(slave)  # the child holds its own copy
 
     def _stop_host_loops(self):
+        """Kill every host-side loop driver. Does NOT interrupt an in-flight cycle.
+
+        `pkill -f` matches on the DRIVER's own cmdline (the `: ARRIVE_HOST_LOOP ...` script), not
+        on the `kubectl exec` it may currently have in flight — that child's cmdline never
+        contains the marker. So a cycle already running when this is called finishes naturally
+        (up to ~7-8s later for S7's pair) before the pod goes quiet; only the NEXT cycle is
+        prevented from starting. Confirmed live: back-to-back miner -> benign_cpu_job tests with
+        no settle gap produced one spurious "stratum fired" on the twin, from the miner's own
+        trailing cycle bleeding past this call. Harmless within a real episode's normal
+        recover-then-teardown flow, and pre-existing for every fault in this file that uses
+        `_start_host_loop` — noted here because S7 is what surfaced it under back-to-back testing.
+        """
         subprocess.run(
             f"pkill -f '{_HOST_LOOP_MARKER}'", shell=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -205,7 +349,14 @@ class SecurityRuntimeInjector(FaultInjector):
                 continue
             if pod:
                 observed = (alert.get("output_fields") or {}).get("k8s.pod.name")
-                if observed and pod not in observed:
+                # An alert with NO k8s.pod.name is a HOST event, not this pod's. It used to fall
+                # through to "kept", which let verification pass on activity that never happened
+                # in the container. That is not hypothetical: several of these rules are tagged
+                # `host` as well as `container`, and the S7 miner rule matches any command line
+                # containing "stratum+tcp" — so an operator (or this repo's own tooling) merely
+                # MENTIONING the string on the host fires it, and a run was observed passing on
+                # exactly that while the in-pod process fired something else entirely.
+                if not observed or pod not in observed:
                     continue
             rules.add(rule)
         return rules
@@ -217,6 +368,7 @@ class SecurityRuntimeInjector(FaultInjector):
         behaviour is not observable — the episode's ground truth would be a lie.
         """
         waited = 0
+        fired: set[str] = set()
         for _ in range(attempts):
             time.sleep(delay)
             waited += delay
@@ -234,6 +386,190 @@ class SecurityRuntimeInjector(FaultInjector):
         if _VERIFY:
             raise FaultVerificationError(msg)
         print(f"[warn] {msg} (ARRIVE_VERIFY_INJECTION=0 — continuing with an UNVERIFIED episode)")
+
+    def _verify_falco_silent(self, forbidden: list[str], pod: str, settle: int = 25):
+        """Assert that NONE of `forbidden` fired for `pod` — the benign twin's half of the contract.
+
+        The positive check above is the wrong shape for a twin whose shared surface is not Falco.
+        `benign_cpu_job` is supposed to look identical to the miner on telemetry and be SILENT on
+        Falco: that silence is the discriminator, so it is a claim the ground truth makes and
+        therefore a claim that has to be measured. A twin that quietly trips a miner rule is not a
+        false-positive test any more, it is a mislabelled attack.
+        """
+        time.sleep(settle)
+        fired = self._falco_rules_fired(since_seconds=settle + 30, pod=pod)
+        leaked = [r for r in forbidden if r in fired]
+        if not leaked:
+            print(f"[security_runtime] verified BENIGN twin on pod {pod}: none of {forbidden} fired")
+            return
+        msg = (
+            f"[security_runtime] TWIN VERIFICATION FAILED for pod {pod}: benign activity fired "
+            f"{leaked}, which is the attack half's discriminating rule set. The pair no longer "
+            "separates attack from look-alike, so this episode would be mislabelled."
+        )
+        if _VERIFY:
+            raise FaultVerificationError(msg)
+        print(f"[warn] {msg} (ARRIVE_VERIFY_INJECTION=0 — continuing with an UNVERIFIED episode)")
+
+    def _require_miner_rules_loaded(self):
+        """Fail fast if Falco has no miner rules loaded at all (the default install has none).
+
+        The miner rules ship in the SANDBOX ruleset; the chart installs `falco-rules:5` only, so
+        the ordinary failure mode for S7 is not "the injection missed" but "the detector was never
+        there". Distinguishing those two costs one exec and saves a confusing verification error.
+        Best-effort: if the ruleset cannot be read, say so and continue — `_verify_falco` is still
+        the real gate.
+        """
+        try:
+            pods = subprocess.run(
+                ["kubectl", "get", "pods", "-n", FALCO_NAMESPACE, "-l", FALCO_SELECTOR,
+                 "-o", "jsonpath={.items[0].metadata.name}"],
+                capture_output=True, text=True, timeout=30,
+            ).stdout.strip()
+            if not pods:
+                print("[security_runtime] could not find a Falco pod — skipping ruleset preflight")
+                return
+            out = subprocess.run(
+                ["kubectl", "exec", "-n", FALCO_NAMESPACE, pods, "-c", "falco", "--",
+                 "sh", "-c", "grep -rl 'Stratum protocol' /etc/falco 2>/dev/null"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            print(f"[security_runtime] ruleset preflight inconclusive ({e}) — continuing")
+            return
+        if out.stdout.strip():
+            print(f"[security_runtime] miner ruleset present: {out.stdout.strip().splitlines()}")
+            return
+        msg = (
+            "[security_runtime] S7 PREREQUISITE MISSING: no miner rules are loaded in Falco. "
+            f"'{_MINER_RULE_STRATUM}' lives in falco-sandbox_rules.yaml (maturity_sandbox), and "
+            "the falco chart installs 'falco-rules:5' (stable) only. Add the sandbox ruleset to "
+            "the Falco install — see the S7 section of this module's docstring for the exact "
+            "helm flags — or S7 will fire nothing on any arm."
+        )
+        if _VERIFY:
+            raise FaultVerificationError(msg)
+        print(f"[warn] {msg} (ARRIVE_VERIFY_INJECTION=0 — continuing with an UNVERIFIED episode)")
+
+    # ---- shared shape for the S7 pair ------------------------------------------------------
+    # Both halves are the SAME mechanism with different strings, so that the only thing that can
+    # separate them on the Falco surface is the miner signature itself and never an artefact of
+    # how they were delivered. Delivered through `_start_host_loop` — the same HOST-side re-exec
+    # loop every other runtime problem in this file uses — for a reason that is NOT symmetry for
+    # its own sake: see the module docstring's "Re-executed every 8s" section for the alert that
+    # went stale under the previous one-shot-background design and why.
+    _CPU_CYCLE_SECONDS = 7   # of each ~8s host-loop cadence; the rest is exec + loop overhead
+
+    def _cpu_loop_action(self, exe: str, marker: str, payload: str, prelude: str = "") -> str:
+        """Build the `action` for `_start_host_loop`: a fresh, TIME-BOUNDED busy loop per cycle.
+
+        `X=<exe>; ln -sf /bin/sh $X || X=/bin/sh` names the process (see `_MINER_EXE`'s comment);
+        `nice -n 19` keeps the app's own threads winning every scheduling contest, so this reads
+        as CPU utilisation and never pushes request latency into readiness-probe territory — a
+        failing probe would put a SECOND telemetry symptom on the board, and S7's design depends
+        on there being exactly one. `prelude` runs BEFORE the exec so `$VAR` references in
+        `payload` expand into the miner's own argv rather than staying literal — see `_MINER_POOL_SPLIT`.
+
+        The bound is `sleep N & W=$!; while kill -0 $W; do :; done` — a background timer checked by
+        a builtin, NOT `while [ $(date +%s)... ]`. That was the first version of this method, and
+        it was wrong in a way `_verify_falco` cannot catch, because Falco fired exactly as
+        designed: `date +%s` is an external binary, so the "tight" loop forked and exec'd a real
+        process on EVERY iteration. Measured on a live pod: the resulting CPU usage was ~12% of a
+        core, not the ~100% S7's telemetry signal requires — fork+exec overhead dominated the
+        loop's wall-clock time instead of computing. `kill -0` is a shell builtin (a plain syscall,
+        no fork), so the checking loop is genuinely CPU-bound; re-measured the same way: ~99.7%.
+        `sleep` itself still forks, but only ONCE per cycle, not once per iteration.
+
+        Every `$` below meant for `$X`'s OWN interpreter (`$!`, `$W`, and the loop's `kill -0`) is
+        escaped as `\\$`, for the same reason as the old date-based bound: the enclosing string is
+        double-quoted in the POD-side shell that builds `$X`'s argv, and an unescaped `$!`/`$W`
+        there refers to variables THAT SHELL never sets — it would expand to an empty string
+        silently, handing `$X` a syntactically-different, broken script instead of erroring.
+        """
+        return (
+            f"sh -c 'X={exe}; ln -sf /bin/sh $X 2>/dev/null; [ -x $X ] || X=/bin/sh; "
+            "N=; command -v nice >/dev/null 2>&1 && N=\"nice -n 19\"; "
+            f"{prelude}"
+            f"$N $X -c \"{marker}=1; {payload}; "
+            f"sleep {self._CPU_CYCLE_SECONDS} & W=\\$!; while kill -0 \\$W 2>/dev/null; "
+            "do :; done\"'"
+        )
+
+    # SR.6 - crypto_miner (ATTACK, detected=True): S7, the TWO-SURFACE fault.
+    #
+    # A simulated miner — process named `xmrig`, a stratum+tcp pool URI in its argv, one core of
+    # sustained load. No mining software runs and no pool is contacted: the "miner" is the base
+    # image's own /bin/sh burning a loop, and the pool URI is an unresolvable .invalid name that
+    # exists only to be read by Falco's cmdline match. Nothing here is a capability an attacker
+    # would gain from it; it reproduces the two observables a defender's tooling keys on.
+    #
+    # Falco fires on the miner signature; `ps`/`top` inside the pod shows a pegged core. Those are
+    # the two surfaces, and they support DIFFERENT conclusions — see the module docstring.
+    _MINER_RULES = [_MINER_RULE_STRATUM]
+    # Matches the miner but can never REPORT it under Falco's default `rule_matching: first`,
+    # because the stratum rule sits earlier in the same file. Kept as a name so the twin can
+    # assert it stays silent, and so its absence on the attack reads as designed, not as a bug.
+    _MINER_RULES_SHADOWED = [_MINER_RULE_KNOWN_BINARY]
+
+    def inject_crypto_miner(self, microservices: list[str]):
+        self._require_miner_rules_loaded()
+        for service in microservices:
+            pod = self._first_pod(service)
+            if not pod:
+                print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
+                continue
+            # S=stratum is assigned in the pod and only expands in the miner's own argv, so the
+            # literal Falco matches on never appears in this host-side command. See _MINER_POOL_*.
+            action = self._cpu_loop_action(
+                _MINER_EXE, _MINER_MARKER,
+                f"POOL={_MINER_POOL_SPLIT}; WORKER=arrive-sim",
+                prelude="S=stratum; ",
+            )
+            self._start_host_loop(pod, action)
+            print(f"[security_runtime] CRYPTO-MINER simulator (proc={_MINER_EXE}, "
+                  f"pool={_MINER_POOL_URI}, 1 core, re-exec every 8s) in pod {pod} ({service}) "
+                  f"| ns: {self.namespace}")
+            self._verify_falco(self._MINER_RULES, pod)
+
+    def recover_crypto_miner(self, microservices: list[str] = None):
+        self._stop_host_loops()
+        print(f"[security_runtime] stopped host loop [{_HOST_LOOP_MARKER}] | ns: {self.namespace}")
+
+    # SR.7 - benign_cpu_job (BENIGN TWIN of crypto_miner, detected=False): S7's RQ2 control,
+    # named explicitly in DETECTION_BENCHMARK_PLAN.md §6.5 ("a real CPU-heavy job vs a
+    # crypto-miner"). A legitimate batch analytics/compression job: the SAME mechanism, the same
+    # single pegged core in the same pod, minus every miner-specific string.
+    #
+    # Read the twin-doctrine at the top of this file carefully before judging this one: the other
+    # twins here share a FALCO rule with their attack, because for those pairs Falco is the only
+    # surface and a twin that fires nothing is just a second no-op. This pair shares a TELEMETRY
+    # signature instead — identical CPU shape — and is silent on Falco by design. The agent it
+    # tests is the one that reasons "sustained CPU spike -> compromised workload"; that agent
+    # false-positives here. An agent reading Falco separates the halves immediately, which is the
+    # point: it is the measurement of how much the runtime surface is worth on a fault where the
+    # telemetry surface is genuinely misleading.
+    def inject_benign_cpu_job(self, microservices: list[str]):
+        for service in microservices:
+            pod = self._first_pod(service)
+            if not pod:
+                print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
+                continue
+            # No stratum URI, and a process name that is on neither `miner_binaries` nor
+            # `shell_binaries` — the latter so it cannot pick up a shell rule the attack lacks.
+            action = self._cpu_loop_action(
+                _CPU_JOB_EXE, _CPU_JOB_MARKER,
+                "JOB=nightly-rollup; LEVEL=9; OUT=/tmp/rollup.gz",
+            )
+            self._start_host_loop(pod, action)
+            print(f"[security_runtime] BENIGN CPU-heavy batch job (proc={_CPU_JOB_EXE}, 1 core, "
+                  f"re-exec every 8s) in pod {pod} ({service}) | ns: {self.namespace}")
+            # The twin's claim is a NEGATIVE one, so verify the negative.
+            self._verify_falco_silent(
+                self._MINER_RULES + self._MINER_RULES_SHADOWED, pod)
+
+    def recover_benign_cpu_job(self, microservices: list[str] = None):
+        self._stop_host_loops()
+        print(f"[security_runtime] stopped host loop [{_HOST_LOOP_MARKER}] | ns: {self.namespace}")
 
     # SR.2 - transient_read: TRANSIENT credential theft — the clean "coverage" fault (base blind).
     def inject_transient_read(self, microservices: list[str]):
@@ -344,5 +680,25 @@ class SecurityRuntimeInjector(FaultInjector):
 
 
 if __name__ == "__main__":
-    injector = SecurityRuntimeInjector("test-social-network")
-    injector._inject(fault_type="rogue_shell", microservices=["user-service"])
+    # Smoke-test one injector against a live cluster. Because every inject_* here verifies itself
+    # against Falco and RAISES on failure, a clean exit IS the verification — there is nothing to
+    # assert afterwards.
+    #
+    #   python -m aiopslab.generators.fault.security_runtime [FAULT] [NAMESPACE] [SERVICE]
+    #
+    # S7 (needs the SANDBOX ruleset loaded — see the module docstring):
+    #   ... security_runtime crypto_miner    test-hotel-reservation user
+    #   ... security_runtime benign_cpu_job  test-hotel-reservation user
+    # The pair is only meaningful run BOTH ways: the attack must fire the miner rule and the twin
+    # must not, and only the second of those is a claim you can get wrong without noticing.
+    import sys
+
+    fault = sys.argv[1] if len(sys.argv) > 1 else "rogue_shell"
+    namespace = sys.argv[2] if len(sys.argv) > 2 else "test-social-network"
+    service = sys.argv[3] if len(sys.argv) > 3 else "user-service"
+
+    injector = SecurityRuntimeInjector(namespace)
+    injector._inject(fault_type=fault, microservices=[service])
+    print(f"[smoke] {fault} injected and verified in {namespace}/{service}")
+    input("[smoke] press enter to recover... ")
+    injector._recover(fault_type=fault, microservices=[service])

@@ -10,4 +10,6 @@ from .security_benign import (
     BenignPrivilegedLocalization,
     BenignRunAsRootDetection,
     BenignRunAsRootLocalization,
+    BenignCpuJobDetection,
+    BenignCpuJobLocalization,
 )

@@ -36,6 +36,7 @@ from aiopslab.orchestrator.problems.security_rbac_escalation import *
 from aiopslab.orchestrator.problems.security_rogue_shell import *
 from aiopslab.orchestrator.problems.security_transient_read import *
 from aiopslab.orchestrator.problems.security_attacker_shell import *
+from aiopslab.orchestrator.problems.security_crypto_miner import *
 from aiopslab.orchestrator.problems.security_noop import *
 from aiopslab.orchestrator.problems.security_benign import *
 
@@ -76,6 +77,20 @@ class ProblemRegistry:
             # the shared rule is what makes a twin a real specificity test, not a second no-op.
             "security_attacker_shell-detection-1": lambda: AttackerShellDetection(),
             "security_attacker_shell-localization-1": lambda: AttackerShellLocalization(),
+            # S7 — the ONLY TWO-SURFACE fault in the suite. Every other runtime problem above is
+            # Falco-only by design; this one is visible to Falco AND to telemetry at the same
+            # time, and the two surfaces support different conclusions: Falco says "resource
+            # hijacking" (T1496, Impact, HIGH), a pegged core says "hot workload" — a reliability
+            # symptom with a reliability severity. What is measured is whether an agent stops at
+            # the second reading, which is available even to the arms with no security sensor.
+            # PREREQUISITE: the miner rules ship in Falco's SANDBOX ruleset and the chart installs
+            # the stable ruleset only — the injector fails fast with the helm flags if absent.
+            # RQ2 twin: security_benign_cpu_job. Unlike the shell pairs, that twin shares the
+            # TELEMETRY signature (same one-core load) and fires no Falco rule at all — so the
+            # discriminator is the miner signature, and an agent reasoning from CPU alone
+            # false-positives on the twin. Score the two together.
+            "security_crypto_miner-detection-1": lambda: CryptoMinerDetection(),
+            "security_crypto_miner-localization-1": lambda: CryptoMinerLocalization(),
             # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
             "security_noop_misconfig-detection-1": lambda: NoopMisconfigDetection(),
             "security_noop_misconfig-localization-1": lambda: NoopMisconfigLocalization(),
@@ -92,6 +107,11 @@ class ProblemRegistry:
             # OPA-side twin: fires no-root-user, same deny rule as security_run_as_root.
             "security_benign_run_as_root-detection-1": lambda: BenignRunAsRootDetection(),
             "security_benign_run_as_root-localization-1": lambda: BenignRunAsRootLocalization(),
+            # Telemetry-side twin: a legitimate CPU-heavy batch job with the SAME one-core load
+            # as security_crypto_miner and none of its miner signature. The first twin here whose
+            # shared surface is telemetry rather than a Falco rule — see security_benign.py.
+            "security_benign_cpu_job-detection-1": lambda: BenignCpuJobDetection(),
+            "security_benign_cpu_job-localization-1": lambda: BenignCpuJobLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

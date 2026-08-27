@@ -29,6 +29,23 @@ Score both **paired** with `security_attacker_shell`; that trio is what RQ2 rest
 
 Correct answer for both: "No" / `[]`. A "Yes" is a **false positive** — the deployability metric a
 SOC lives on. Uses the intrusion framing.
+
+The exception: a twin whose shared surface is TELEMETRY, not Falco
+-----------------------------------------------------------------
+`benign_cpu_job` (twin E, the S7 pair) breaks the "a twin must fire the same Falco rule" rule
+stated above, and does so on purpose. That rule is not really about Falco — it is about the twin
+sharing the attack's *evidence*, so that the agent cannot separate the halves by the shape of an
+alert and has to reason about context instead. For every other pair here Falco is the only
+surface there is, so "share the evidence" and "share a Falco rule" are the same requirement.
+
+S7 is the one fault in the suite that is visible on two surfaces (see
+`security_crypto_miner.py`): Falco sees a miner, telemetry sees a pegged core. Its twin shares
+the *telemetry* signature exactly — same sustained one-core load, same pod, same duration — and
+is silent on Falco. So the doctrine holds where it matters: an agent reasoning from "sustained
+CPU spike -> compromised workload" cannot tell this from the miner and false-positives here,
+which is precisely the reasoning S7 exists to catch. What separates them is the miner signature
+on the *other* surface. A twin that fired a miner rule would be a mislabelled attack, so
+`_verify_falco_silent` measures the silence rather than assuming it.
 """
 
 from aiopslab.orchestrator.tasks.security_audit import (
@@ -246,4 +263,57 @@ class BenignSecretReadDetection(_BenignSecretRead, SecurityAuditDetectionTask):
 class BenignSecretReadLocalization(_BenignSecretRead, SecurityAuditLocalizationTask):
     def __init__(self, faulty_service: str = "user"):
         _BenignSecretRead.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+
+# ---- twin E: legitimate CPU-heavy batch job — the TELEMETRY-side twin of S7 ----
+class _BenignCpuJob(_BenignTwinBase):
+    FAULT_TYPE = "benign_cpu_job"
+    BENIGN_ACTIVITY = (
+        "nightly analytics rollup — a legitimate CPU-heavy batch job saturating one core "
+        "inside an application pod"
+    )
+    # Deliberately EMPTY, and deliberately not the same thing as a silent twin. This pair's
+    # shared evidence is the telemetry signature, not a Falco rule; the Falco silence IS the
+    # discriminator, so it is asserted here and measured by the injector's
+    # `_verify_falco_silent` against the miner's rule set. See the module docstring.
+    EXPECTED_FALCO_RULES: list[str] = []
+    RQ2_PAIR = "security_crypto_miner-detection-1"
+    # The miner rules this benign job must NOT fire, mirrored from the attack half's ground
+    # truth. Kept on the problem so the label registry and any analysis can read the twin's
+    # negative claim without importing the injector.
+    # The second is shadowed on the attack half (Falco's `rule_matching: first`), so it never
+    # reports there either. It stays in the twin's forbidden set anyway: this list is what the
+    # twin must NOT do, and it costs nothing to assert silence on a rule that could start
+    # reporting the day someone sets `rule_matching: all`.
+    FORBIDDEN_FALCO_RULES = [
+        "Detect crypto miners using the Stratum protocol",
+        "Known Cryptominer Process Executed",
+    ]
+
+    def __init__(self, faulty_service: str = "user"):
+        super().__init__(faulty_service=faulty_service)
+        # The base class derives `detection_surface` and `fault_class` from EXPECTED_FALCO_RULES,
+        # which is the right default for every Falco-side twin and the wrong one here: an empty
+        # Falco list would mark this "benign-twin-silent" (behaves as a second no-op) when in
+        # fact it is loudly visible — on telemetry. Overridden rather than generalised, because
+        # this is the only two-surface fault in the suite and a general mechanism would invite
+        # future twins to declare a surface they have not verified.
+        self.ground_truth |= {
+            "detection_surface": ["telemetry"],
+            "fault_class": "benign-twin",
+            "shared_surface_with_twin": "telemetry",
+            "forbidden_falco_rules": self.FORBIDDEN_FALCO_RULES,
+        }
+
+
+class BenignCpuJobDetection(_BenignCpuJob, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignCpuJob.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+
+class BenignCpuJobLocalization(_BenignCpuJob, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignCpuJob.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
