@@ -25,7 +25,7 @@ it verified against the pinned ruleset and live on a kind+Falco cluster, not rec
      ClusterIP is RFC1918 and those rules exclude RFC1918 — the same wall S7 hit. The dup rule
      sidesteps it by ignoring the destination entirely.
 
-Why it is not "cheating" (``policies/POLICY_DESIGN.md`` §1 test applied to Falco): the rule is a
+Why it is not "cheating" (``policies/README.md`` "is this cheating?" test applied to Falco): the rule is a
 DEFAULT enabled stable rule, chosen before looking at any agent, not tuned to our sink. We do not
 key detection on our exfil IP.
 
