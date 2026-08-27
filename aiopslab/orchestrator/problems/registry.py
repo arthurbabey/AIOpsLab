@@ -37,6 +37,7 @@ from aiopslab.orchestrator.problems.security_rogue_shell import *
 from aiopslab.orchestrator.problems.security_transient_read import *
 from aiopslab.orchestrator.problems.security_attacker_shell import *
 from aiopslab.orchestrator.problems.security_crypto_miner import *
+from aiopslab.orchestrator.problems.security_exfil_egress import *
 from aiopslab.orchestrator.problems.security_noop import *
 from aiopslab.orchestrator.problems.security_benign import *
 
@@ -91,6 +92,18 @@ class ProblemRegistry:
             # false-positives on the twin. Score the two together.
             "security_crypto_miner-detection-1": lambda: CryptoMinerDetection(),
             "security_crypto_miner-localization-1": lambda: CryptoMinerLocalization(),
+            # S4 — data-exfil egress. A rogue transient process ships the mounted SA token out of
+            # the app pod to an unlisted in-cluster collector over a fresh plaintext TCP
+            # connection. Falco-only (the spec is unchanged), MITRE T1048.003, tactic
+            # Exfiltration, severity CRITICAL. The one rule that fires ("Redirect STDOUT/STDIN to
+            # Network Connection in Container") is a STABLE-ruleset socket-dup detection, so S4
+            # needs NO ruleset change (unlike S7) — but its own tag reads execution/T1059, NOT
+            # exfil: a different wrong label, not the answer, which only bites the ordinal
+            # severity score. RQ2 twin: security_benign_telemetry_egress fires the SAME one rule
+            # shipping innocuous uptime telemetry to a documented collector — the discriminator is
+            # the source read (cmdline) and the destination, not the alert. Score the two together.
+            "security_exfil_egress-detection-1": lambda: ExfilEgressDetection(),
+            "security_exfil_egress-localization-1": lambda: ExfilEgressLocalization(),
             # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
             "security_noop_misconfig-detection-1": lambda: NoopMisconfigDetection(),
             "security_noop_misconfig-localization-1": lambda: NoopMisconfigLocalization(),
@@ -112,6 +125,12 @@ class ProblemRegistry:
             # shared surface is telemetry rather than a Falco rule — see security_benign.py.
             "security_benign_cpu_job-detection-1": lambda: BenignCpuJobDetection(),
             "security_benign_cpu_job-localization-1": lambda: BenignCpuJobLocalization(),
+            # Falco-side twin of S4: legitimate telemetry egress. Fires the SAME single rule as
+            # security_exfil_egress ("Redirect STDOUT/STDIN...") shipping pod uptime to the
+            # documented telemetry-collector. The alert is identical; the discriminator is the
+            # source (proc.cmdline: /proc/uptime vs the SA token) and the destination Service.
+            "security_benign_telemetry_egress-detection-1": lambda: BenignTelemetryEgressDetection(),
+            "security_benign_telemetry_egress-localization-1": lambda: BenignTelemetryEgressLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

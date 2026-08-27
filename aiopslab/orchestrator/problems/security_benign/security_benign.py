@@ -317,3 +317,33 @@ class BenignCpuJobLocalization(_BenignCpuJob, SecurityAuditLocalizationTask):
     def __init__(self, faulty_service: str = "user"):
         _BenignCpuJob.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+
+# ---- twin F: legitimate telemetry egress — the Falco-side twin of S4 (exfil) ----
+class _BenignTelemetryEgress(_BenignTwinBase):
+    FAULT_TYPE = "benign_telemetry_egress"
+    BENIGN_ACTIVITY = (
+        "operational telemetry POST — a periodic outbound connection shipping pod uptime "
+        "counters to the documented telemetry-collector"
+    )
+    # The SAME single rule the attack half (security_exfil_egress) fires — a socket-dup detection
+    # that does NOT look at the destination, so the alert is byte-identical for the two halves.
+    # Unlike the shell twins, there is no second attack-only rule: the attack's extra evidence is
+    # WHAT it read (the SA token) and WHERE it sent it (the unlisted data-collector), both visible
+    # only in the shared alert's proc.cmdline / connection fields, not as a distinct rule. That is
+    # the discriminator, and it is why an agent that flags any outbound redirect false-positives
+    # here. See security_runtime.py::inject_benign_telemetry_egress.
+    EXPECTED_FALCO_RULES = ["Redirect STDOUT/STDIN to Network Connection in Container"]
+    RQ2_PAIR = "security_exfil_egress"
+
+
+class BenignTelemetryEgressDetection(_BenignTelemetryEgress, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignTelemetryEgress.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+
+class BenignTelemetryEgressLocalization(_BenignTelemetryEgress, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignTelemetryEgress.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
