@@ -142,6 +142,67 @@ class SecurityMisconfigInjector(FaultInjector):
         return self._privileged_daemonset(
             self.BENIGN_PRIVILEGED_NAME, "install-cni", "docker.io/istio/install-cni:1.20.0")
 
+    def inject_benign_privileged(self, microservices: list[str] = None):
+        """Deploy a legitimately-privileged CNI installer alongside the app."""
+        print(f"[security_misconfig] benign twin: {self.BENIGN_PRIVILEGED_NAME} "
+              f"(privileged, legitimate) | ns: {self.namespace}")
+        manifest = json.dumps(self._benign_privileged_manifest())
+        print(self.kubectl.exec_command(
+            f"echo '{manifest}' | kubectl apply -f -").strip())
+
+    def recover_benign_privileged(self, microservices: list[str] = None):
+        print(f"[security_misconfig] removing benign twin: {self.BENIGN_PRIVILEGED_NAME}")
+        print(self.kubectl.exec_command(
+            f"kubectl delete daemonset {self.BENIGN_PRIVILEGED_NAME} "
+            f"-n {self.namespace} --ignore-not-found").strip())
+
+    # SM.2 - run_as_root (Tier 1): invert no-root-user.rego
+    # Sets container securityContext.runAsUser=0. DeathStarBench containers already run as
+    # root, so this changes nothing at runtime (non-breaking) — it only makes the hardening
+    # violation spec-visible. Subtler than `privileged`: one easy-to-skim field.
+    def inject_run_as_root(self, microservices: list[str]):
+        for service in microservices:
+            print(f"[security_misconfig] runAsUser:0 on {service} | ns: {self.namespace}")
+            for name in self._container_names(service):
+                patch = {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {"name": name, "securityContext": {"runAsUser": 0}}
+                                ]
+                            }
+                        }
+                    }
+                }
+                cmd = (
+                    f"kubectl patch deployment {service} -n {self.namespace} "
+                    f"--type=strategic -p '{json.dumps(patch)}'"
+                )
+                print(self.kubectl.exec_command(cmd).strip())
+
+    def recover_run_as_root(self, microservices: list[str]):
+        for service in microservices:
+            print(f"[security_misconfig] revert runAsUser on {service} | ns: {self.namespace}")
+            for name in self._container_names(service):
+                # null in a strategic-merge patch deletes the field → restores original.
+                patch = {
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [
+                                    {"name": name, "securityContext": {"runAsUser": None}}
+                                ]
+                            }
+                        }
+                    }
+                }
+                cmd = (
+                    f"kubectl patch deployment {service} -n {self.namespace} "
+                    f"--type=strategic -p '{json.dumps(patch)}'"
+                )
+                print(self.kubectl.exec_command(cmd).strip())
+
     # SM.2b - benign_run_as_root: the BENIGN TWIN of run_as_root.
     #
     # Fires the SAME policy (no-root-user) and the SAME deny rule as SM.2 — container-level
