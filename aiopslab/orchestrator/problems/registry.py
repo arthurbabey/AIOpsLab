@@ -38,6 +38,7 @@ from aiopslab.orchestrator.problems.security_transient_read import *
 from aiopslab.orchestrator.problems.security_attacker_shell import *
 from aiopslab.orchestrator.problems.security_crypto_miner import *
 from aiopslab.orchestrator.problems.security_exfil_egress import *
+from aiopslab.orchestrator.problems.security_hostpath_escape import *
 from aiopslab.orchestrator.problems.security_noop import *
 from aiopslab.orchestrator.problems.security_benign import *
 
@@ -104,6 +105,20 @@ class ProblemRegistry:
             # the source read (cmdline) and the destination, not the alert. Score the two together.
             "security_exfil_egress-detection-1": lambda: ExfilEgressDetection(),
             "security_exfil_egress-localization-1": lambda: ExfilEgressLocalization(),
+            # S2 — hostPath / host-mount escape. A workload gains a hostPath volume mounting
+            # /var/lib/kubelet (the kubelet's own directory: client cert/key -> node + API-server
+            # credentials), MITRE T1611 (Escape to Host), tactic Privilege Escalation, severity
+            # HIGH. Dual-corroboration, LIVE-VERIFIED: OPA sees the spec instantly
+            # (no-sensitive-hostpath-mounts) and Falco fires "Launch Sensitive Mount Container"
+            # unconditionally at container start (no access step needed) — the first fault in the
+            # suite where that OPA+Falco corroboration is actually checked, not just designed for
+            # (SM.1/SM.2 carry an opa_control field but never verify Falco). RQ2 twin:
+            # security_benign_hostpath_mount fires the SAME policy and the SAME rule from a
+            # CSI-node-plugin DaemonSet with a real reason to mount the identical path — the
+            # discriminator is whose workload it is, not the evidence shape. Score the two
+            # together.
+            "security_hostpath_escape-detection-1": lambda: HostpathEscapeDetection(),
+            "security_hostpath_escape-localization-1": lambda: HostpathEscapeLocalization(),
             # No-op controls (RQ1 false-alarm rate): nothing injected, detected=False
             "security_noop_misconfig-detection-1": lambda: NoopMisconfigDetection(),
             "security_noop_misconfig-localization-1": lambda: NoopMisconfigLocalization(),
@@ -131,6 +146,11 @@ class ProblemRegistry:
             # source (proc.cmdline: /proc/uptime vs the SA token) and the destination Service.
             "security_benign_telemetry_egress-detection-1": lambda: BenignTelemetryEgressDetection(),
             "security_benign_telemetry_egress-localization-1": lambda: BenignTelemetryEgressLocalization(),
+            # Dual OPA+Falco twin of S2: fires no-sensitive-hostpath-mounts AND "Launch Sensitive
+            # Mount Container", same as security_hostpath_escape — a CSI-node-plugin DaemonSet
+            # legitimately mounting the kubelet directory.
+            "security_benign_hostpath_mount-detection-1": lambda: BenignHostpathMountDetection(),
+            "security_benign_hostpath_mount-localization-1": lambda: BenignHostpathMountLocalization(),
             # K8s target port misconfig
             "k8s_target_port-misconfig-detection-1": lambda: K8STargetPortMisconfigDetection(
                 faulty_service="user-service"

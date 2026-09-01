@@ -13,6 +13,16 @@ Vertical-slice scope: ``privileged_container`` (inverts ``no-privileged-containe
 the Tier-0 rung of the §8.1 difficulty ladder in ``reports/DETECTION_BENCHMARK_PLAN.md``.
 Further rungs (allowPrivilegeEscalation, wildcard RBAC, hostNetwork, ...) are added here as
 ``inject_<fault>`` / ``recover_<fault>`` pairs following the same pattern.
+
+``hostpath_escape`` (SM.5, S2 in ``reports/BENCHMARK_IDEAS.md`` §2) breaks that mould on
+purpose: every other fault in this module is OPA-only (the headline finding for SM.1-SM.4 is
+that static-spec drift already saturates a react agent with `kubectl`, so a runtime sensor adds
+nothing here — see the ARRIVE OPA-ladder result). SM.5 is the one static-spec fault that is ALSO
+independently visible to Falco with no exec/access step required: mounting a sensitive host
+directory fires Falco's "Launch Sensitive Mount Container" (``falco-sandbox_rules.yaml``,
+``container_started and sensitive_mount`` -- verified against the live ruleset, see the
+``_verify_hostpath_falco`` docstring) the moment the patched pod's container starts, same as the
+OPA-visible field flip. So unlike SM.1-SM.4, this injector verifies Falco, not just the patch.
 """
 
 import json
@@ -468,6 +478,198 @@ class SecurityMisconfigInjector(FaultInjector):
             f"kubectl delete serviceaccount {self._ESC_SA} -n {self.namespace} --ignore-not-found"
         )
         print(f"[security_misconfig] recovered rbac_escalation ({n_benign+1} Roles, SA, binding) | ns: {self.namespace}")
+
+    # SM.5 - hostpath_escape (S2): invert no-sensitive-hostpath-mounts.rego. The workload gains a
+    # hostPath volume mounting the kubelet's own directory (client cert/key -> node + API-server
+    # credentials) at the SAME path inside the container that a real CSI node-driver plugin uses
+    # -- a genuine container/node-escape primitive (NSA/CISA; MITRE T1611 "Escape to Host"), not a
+    # decorative field. Read-only and never exercised: presence is the drift, matching SM.1-SM.4's
+    # non-breaking design. See the module docstring for why this is the one fault here that also
+    # verifies Falco.
+    HOSTPATH_ESCAPE_VOLUME = "node-plugin-dir"
+    HOSTPATH_ESCAPE_PATH = "/var/lib/kubelet"
+    _HOSTPATH_ESCAPE_RULE = "Launch Sensitive Mount Container"
+
+    def _patch_hostpath_mount(self, deployment: str, volume_name: str, host_path: str,
+                               mount_path: str, add: bool):
+        """Strategic-merge a hostPath volume + matching mount into every container.
+
+        `volumes` merge-keys on `name`; `containers[].volumeMounts` merge-keys on **`mountPath`**,
+        not `name` -- a K8s OpenAPI schema quirk (confirmed live: a `$patch: delete` keyed on
+        `name` was rejected with "does not contain declared merge key: mountPath"). Either way, a
+        patch naming only the new volume/mount ADDS it without touching existing entries -- the
+        same property `_set_privileged` relies on for securityContext. `add=False` uses the
+        `$patch: delete` directive to remove exactly that keyed list item (a strategic-merge patch
+        cannot null out a single list element the way it can a map key).
+        """
+        if add:
+            volumes_patch = [{"name": volume_name, "hostPath": {"path": host_path}}]
+            vm_entry = {"name": volume_name, "mountPath": mount_path, "readOnly": True}
+        else:
+            volumes_patch = [{"name": volume_name, "$patch": "delete"}]
+            vm_entry = {"mountPath": mount_path, "$patch": "delete"}
+        patch = {
+            "spec": {"template": {"spec": {
+                "volumes": volumes_patch,
+                "containers": [
+                    {"name": name, "volumeMounts": [vm_entry]}
+                    for name in self._container_names(deployment)
+                ],
+            }}}
+        }
+        cmd = (
+            f"kubectl patch deployment {deployment} -n {self.namespace} "
+            f"--type=strategic -p '{json.dumps(patch)}'"
+        )
+        print(self.kubectl.exec_command(cmd).strip())
+
+    def _current_pod(self, name_prefix: str) -> str | None:
+        """Newest non-terminating running pod whose name starts with `name_prefix`.
+
+        Deliberately NOT `SecurityRuntimeInjector._first_pod`: that helper's
+        `--field-selector=status.phase=Running` still matches a pod mid-termination (a Terminating
+        pod keeps `status.phase: Running` until its container actually stops), and picking
+        whichever match sorts first raced against the OLD pre-patch pod right after a rollout --
+        caught live: `_verify_hostpath_falco` was handed the deployment's pod BEFORE the rollout's
+        old ReplicaSet had actually torn down, so it verified Falco against a pod that never
+        mounted anything and failed. Filtering out `deletionTimestamp` and sorting by
+        `creationTimestamp` picks the pod that is actually there now.
+        """
+        out = self.kubectl.exec_command(f"kubectl get pods -n {self.namespace} -o json")
+        pods = json.loads(out).get("items", [])
+        candidates = [
+            p for p in pods
+            if p["metadata"]["name"].startswith(name_prefix)
+            and not p["metadata"].get("deletionTimestamp")
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p["metadata"]["creationTimestamp"], reverse=True)
+        return candidates[0]["metadata"]["name"]
+
+    def _verify_hostpath_falco(self, deployment: str):
+        """Wait for the rollout, then confirm "Launch Sensitive Mount Container" actually fired.
+
+        The rule is `container_started and sensitive_mount` -- it fires ONCE, at the new
+        container's first process, keyed on the mount's CONTAINER-SIDE path (verified live
+        against the deployed ``falco-sandbox_rules.yaml``: the `sensitive_mount` macro tests
+        `container.mount.dest`, not the host-side source), which is why the mount path above is
+        set to match `HOSTPATH_ESCAPE_PATH` exactly rather than a renamed subdirectory. Delegates
+        the actual log-scraping to `SecurityRuntimeInjector._verify_falco` (import deferred to
+        avoid a module-load cycle -- `security_runtime` does not import this module, but keeping
+        the coupling explicit and local is cheaper than restructuring both files for one shared
+        helper); pod selection is `_current_pod` above, not that class's `_first_pod`.
+        """
+        self.kubectl.exec_command(
+            f"kubectl rollout status deployment {deployment} -n {self.namespace} --timeout=120s"
+        )
+        pod = self._current_pod(deployment)
+        if pod is None:
+            print(f"[security_misconfig] WARNING: no running pod for '{deployment}' "
+                  "-- cannot verify Falco")
+            return
+        from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
+        SecurityRuntimeInjector(self.namespace)._verify_falco([self._HOSTPATH_ESCAPE_RULE], pod)
+
+    def inject_hostpath_escape(self, microservices: list[str]):
+        for service in microservices:
+            print(f"[security_misconfig] hostPath escape: mount {self.HOSTPATH_ESCAPE_PATH} "
+                  f"on {service} | ns: {self.namespace}")
+            self._patch_hostpath_mount(
+                service, self.HOSTPATH_ESCAPE_VOLUME, self.HOSTPATH_ESCAPE_PATH,
+                self.HOSTPATH_ESCAPE_PATH, add=True,
+            )
+            self._verify_hostpath_falco(service)
+
+    def recover_hostpath_escape(self, microservices: list[str]):
+        for service in microservices:
+            print(f"[security_misconfig] revert hostPath escape on {service} | ns: {self.namespace}")
+            self._patch_hostpath_mount(
+                service, self.HOSTPATH_ESCAPE_VOLUME, self.HOSTPATH_ESCAPE_PATH,
+                self.HOSTPATH_ESCAPE_PATH, add=False,
+            )
+
+    # SM.5b - benign_hostpath_mount: the BENIGN TWIN of hostpath_escape.
+    #
+    # Fires the SAME OPA policy (no-sensitive-hostpath-mounts) AND the SAME Falco rule (Launch
+    # Sensitive Mount Container) as SM.5, mounting the identical host path -- on a workload with a
+    # real reason for it. CSI node-driver plugins (AWS EBS CSI, local-path-provisioner, and
+    # others) mount the kubelet directory at this same container path so they can see and manage
+    # per-pod volume mounts; that is a standard, widely-deployed pattern, not a contrivance.
+    #
+    # Unlike SM.1b/SM.2b, there is no second field to omit that would give the pair a different
+    # policy/rule signature -- both surfaces are already identical by construction. The
+    # discriminator is WHOSE workload this is: a CSI-node-plugin DaemonSet has a documented reason
+    # to touch the kubelet directory; an application microservice does not. The twin's container
+    # only lists the kubelet's per-pod mount directory (housekeeping) -- it never reads the
+    # kubelet's credentials, so it cannot be reframed as a credential-theft step.
+    BENIGN_HOSTPATH_NAME = "ebs-csi-node"
+
+    def _benign_hostpath_manifest(self) -> dict:
+        return {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "metadata": {
+                "name": self.BENIGN_HOSTPATH_NAME,
+                "namespace": self.namespace,
+                "labels": {"app": self.BENIGN_HOSTPATH_NAME, "k8s-app": self.BENIGN_HOSTPATH_NAME},
+            },
+            "spec": {
+                "selector": {"matchLabels": {"app": self.BENIGN_HOSTPATH_NAME}},
+                "template": {
+                    "metadata": {"labels": {"app": self.BENIGN_HOSTPATH_NAME}},
+                    "spec": {
+                        "containers": [{
+                            "name": "csi-node",
+                            "image": "docker.io/library/busybox:1.36",
+                            # Read-only housekeeping only: lists the kubelet's per-pod mount
+                            # dirs, the legitimate reason a CSI node plugin needs this mount.
+                            # Mount dest is the SAME path as the attack's -- required for both
+                            # the OPA policy and the Falco rule (keyed on container-side dest,
+                            # see `_verify_hostpath_falco`) to match identically.
+                            "command": ["/bin/sh", "-c",
+                                        f"while true; do "
+                                        f"ls {self.HOSTPATH_ESCAPE_PATH}/pods >/dev/null 2>&1; "
+                                        "sleep 30; done"],
+                            "volumeMounts": [{
+                                "name": self.HOSTPATH_ESCAPE_VOLUME,
+                                "mountPath": self.HOSTPATH_ESCAPE_PATH,
+                                "readOnly": True,
+                            }],
+                        }],
+                        "volumes": [{
+                            "name": self.HOSTPATH_ESCAPE_VOLUME,
+                            "hostPath": {"path": self.HOSTPATH_ESCAPE_PATH},
+                        }],
+                    },
+                },
+            },
+        }
+
+    def inject_benign_hostpath_mount(self, microservices: list[str] = None):
+        print(f"[security_misconfig] benign twin: {self.BENIGN_HOSTPATH_NAME} (mounts "
+              f"{self.HOSTPATH_ESCAPE_PATH}, legitimate CSI node-plugin pattern) | "
+              f"ns: {self.namespace}")
+        manifest = json.dumps(self._benign_hostpath_manifest())
+        self.kubectl.exec_command("kubectl apply -f -", input_data=manifest)
+        self.kubectl.exec_command(
+            f"kubectl wait --for=condition=Ready pod -l app={self.BENIGN_HOSTPATH_NAME} "
+            f"-n {self.namespace} --timeout=120s"
+        )
+        pod = self._current_pod(self.BENIGN_HOSTPATH_NAME)
+        if pod is None:
+            print("[security_misconfig] WARNING: no running pod for "
+                  f"'{self.BENIGN_HOSTPATH_NAME}' -- cannot verify Falco")
+            return
+        from aiopslab.generators.fault.security_runtime import SecurityRuntimeInjector
+        SecurityRuntimeInjector(self.namespace)._verify_falco([self._HOSTPATH_ESCAPE_RULE], pod)
+
+    def recover_benign_hostpath_mount(self, microservices: list[str] = None):
+        print(f"[security_misconfig] removing benign twin: {self.BENIGN_HOSTPATH_NAME}")
+        self.kubectl.exec_command(
+            f"kubectl delete daemonset {self.BENIGN_HOSTPATH_NAME} "
+            f"-n {self.namespace} --ignore-not-found"
+        )
 
 
 if __name__ == "__main__":

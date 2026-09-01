@@ -220,6 +220,46 @@ class BenignRunAsRootLocalization(_BenignRunAsRoot, SecurityAuditLocalizationTas
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
 
 
+# ---- twin G: legitimate CSI node-driver plugin — the dual OPA+Falco twin of SM.5 (S2) ----
+class _BenignHostpathMount(_BenignOpaTwinBase):
+    FAULT_TYPE = "benign_hostpath_mount"
+    BENIGN_ACTIVITY = (
+        "CSI node-driver plugin DaemonSet mounting the kubelet directory to manage "
+        "per-pod volume state"
+    )
+    # Exactly the policy security_hostpath_escape fires, and only that one.
+    EXPECTED_OPA_POLICIES = ["arrive-no-sensitive-hostpath-mounts"]
+    RQ2_PAIR = "security_hostpath_escape-detection-1"
+    # Unlike every other OPA twin (C, D above), this pair is ALSO Falco-verified: the mount fires
+    # "Launch Sensitive Mount Container" on both halves identically, because the rule keys on the
+    # CONTAINER-SIDE mount path, and the twin mounts at the same path as the attack for the same
+    # structural reason a real CSI node plugin does. See security_hostpath_escape.py's docstring.
+    EXPECTED_FALCO_RULES = ["Launch Sensitive Mount Container"]
+
+    def __init__(self, faulty_service: str = "user-service"):
+        super().__init__(faulty_service=faulty_service)
+        # _BenignOpaTwinBase.__init__ derives detection_surface from EXPECTED_OPA_POLICIES alone
+        # and clears expected_falco_rules — correct for twins C/D, wrong for the one twin here
+        # whose evidence spans both sensors rather than just OPA.
+        self.ground_truth |= {
+            "detection_surface": ["opa", "falco"],
+            "expected_falco_rules": self.EXPECTED_FALCO_RULES,
+            "shared_rule_with_twin": "Launch Sensitive Mount Container",
+        }
+
+
+class BenignHostpathMountDetection(_BenignHostpathMount, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignHostpathMount.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
+class BenignHostpathMountLocalization(_BenignHostpathMount, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user-service"):
+        _BenignHostpathMount.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="misconfig")
+
+
 # ---- twin A: admin debug shell — the working RQ2 twin ----
 class _BenignAdminShell(_BenignTwinBase):
     FAULT_TYPE = "benign_admin_shell"

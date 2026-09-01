@@ -14,4 +14,6 @@ from .security_benign import (
     BenignCpuJobLocalization,
     BenignTelemetryEgressDetection,
     BenignTelemetryEgressLocalization,
+    BenignHostpathMountDetection,
+    BenignHostpathMountLocalization,
 )
