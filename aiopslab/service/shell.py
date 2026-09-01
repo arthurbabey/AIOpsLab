@@ -99,16 +99,13 @@ class Shell:
     @staticmethod
     def docker_exec(container_name: str, command: str, timeout=30):
         """Execute a command inside a running Docker container."""
-        escaped_command = command.replace('"', '\\"')
-        
-        docker_command = f'docker exec {container_name} sh -c "{escaped_command}"'
-
         try:
+            # Pass the command as a single argv element so that no shell on the
+            # host parses it.
             out = subprocess.run(
-                docker_command,
+                ["docker", "exec", container_name, "sh", "-c", command],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                shell=True,
                 timeout=timeout
             )
 
