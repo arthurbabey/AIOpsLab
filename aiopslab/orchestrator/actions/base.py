@@ -85,7 +85,7 @@ class TaskActions:
 
         Args:
             command (str): The command to execute.
-            timeout (int): Timeout in seconds for the command execution. Default is 30.
+            timeout (int): Timeout in seconds for the command execution. Default is 120.
 
         Returns:
             str: The output of the command.
@@ -101,7 +101,7 @@ class TaskActions:
             if pattern in command:
                 return error
 
-        result = Shell.exec(command) 
+        result = Shell.exec(command, timeout=timeout)
 
         if re.search(LOG_COMMAND_PATTERN, command):
             result = greedy_compress_lines(result)
