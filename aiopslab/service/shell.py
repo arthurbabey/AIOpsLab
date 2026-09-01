@@ -109,11 +109,13 @@ class Shell:
                 timeout=timeout
             )
 
+            output_message = out.stdout.decode("utf-8") + out.stderr.decode("utf-8")
+
             if out.returncode != 0:
-                error_message = out.stderr.decode("utf-8")
-                return f"[ERROR] Docker command execution failed: {error_message}"
+                if output_message and not output_message.endswith("\n"):
+                    output_message += "\n"
+                return f"{output_message}[exit code: {out.returncode}]"
             else:
-                output_message = out.stdout.decode("utf-8")
                 return output_message
 
         except Exception as e:
