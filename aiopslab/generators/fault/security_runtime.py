@@ -313,9 +313,9 @@ class SecurityRuntimeInjector(FaultInjector):
             if not pod:
                 print(f"[security_runtime] no running pod for '{service}' in {self.namespace} — skipped")
                 continue
-            # Background subshell loop (no setsid/nohup dependency); survives exec-session exit,
-            # keeps firing Falco every ~12s for the episode. stdin/out detached so exec returns.
-            inner = f"(while true; do {_ROGUE_MARKER} >/dev/null 2>&1; sleep 12; done) </dev/null >/dev/null 2>&1 &"
+            # setsid: without it the loop dies with the exec session and fires only at injection.
+            inner = (f'setsid sh -c "while true; do {_ROGUE_MARKER} >/dev/null 2>&1; sleep 12; done" '
+                     f'</dev/null >/dev/null 2>&1 &')
             cmd = f"kubectl exec {pod} -n {self.namespace} -- sh -c '{inner}'"
             out = self.kubectl.exec_command(cmd)
             print(f"[security_runtime] rogue process reading /etc/shadow in pod {pod} "
