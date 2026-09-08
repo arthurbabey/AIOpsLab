@@ -387,3 +387,21 @@ class BenignTelemetryEgressLocalization(_BenignTelemetryEgress, SecurityAuditLoc
     def __init__(self, faulty_service: str = "user"):
         _BenignTelemetryEgress.__init__(self, faulty_service=faulty_service)
         SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+class _BenignPuppetRead(_BenignTwinBase):
+    FAULT_TYPE = "puppet_read"   # must match inject_puppet_read exactly
+    BENIGN_ACTIVITY = "Puppet configuration-management agent reading /etc/shadow to reconcile user/password state"
+    EXPECTED_FALCO_RULES = ["Read sensitive file untrusted"]
+    RQ2_PAIR = "security_rogue_shell-detection-1"   # also twins transient_read — note both
+
+
+class BenignPuppetReadDetection(_BenignPuppetRead, SecurityAuditDetectionTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignPuppetRead.__init__(self, faulty_service=faulty_service)
+        SecurityAuditDetectionTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
+
+
+class BenignPuppetReadLocalization(_BenignPuppetRead, SecurityAuditLocalizationTask):
+    def __init__(self, faulty_service: str = "user"):
+        _BenignPuppetRead.__init__(self, faulty_service=faulty_service)
+        SecurityAuditLocalizationTask.__init__(self, self.app, self.ground_truth, mode="intrusion")
